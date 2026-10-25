@@ -1,0 +1,89 @@
+{
+  "selected_model": "logistic_plain_base",
+  "calibration": "sigmoid",
+  "policy": {
+    "review": 0.12419255718131021,
+    "block": 0.1329095354664825
+  },
+  "selection_metrics": {
+    "roc_auc": 0.6603452243958572,
+    "average_precision": 0.28911517346764026,
+    "brier": 0.10104377040590894,
+    "log_loss": 0.3650752137587634
+  },
+  "calibration_metrics": {
+    "method": "sigmoid",
+    "roc_auc": 0.6389824167601944,
+    "average_precision": 0.22078956184848186,
+    "brier": 0.1041836384948227,
+    "log_loss": 0.3604638404493773
+  },
+  "test_metrics": {
+    "roc_auc": 0.6514777364768267,
+    "average_precision": 0.21101291795049917,
+    "brier": 0.10527934587963808,
+    "log_loss": 0.363215584720544,
+    "precision_at_review": 0.20253164556962025,
+    "recall_at_review": 0.4383561643835616,
+    "f1_at_review": 0.27705627705627706,
+    "confusion_at_review": [
+      [
+        401,
+        126
+      ],
+      [
+        41,
+        32
+      ]
+    ]
+  },
+  "test_policy": {
+    "review_threshold": 0.12419255718131021,
+    "block_threshold": 0.1329095354664825,
+    "total_expected_cost": 9114.926,
+    "cost_per_transaction": 15.191543333333332,
+    "review_count": 66,
+    "block_count": 92,
+    "approve_count": 442,
+    "legitimate_block_count": 71,
+    "false_positive_count": 126,
+    "fraud_approved_count": 41,
+    "fraud_capture_rate": 0.40821917808219177,
+    "precision": 0.20253164556962025,
+    "recall": 0.4383561643835616,
+    "review_capacity_utilization": 0.7333333333333333
+  },
+  "approve_all": {
+    "review_threshold": 1,
+    "block_threshold": 1,
+    "total_expected_cost": 12103.02,
+    "cost_per_transaction": 20.1717,
+    "review_count": 0,
+    "block_count": 0,
+    "approve_count": 600,
+    "legitimate_block_count": 0,
+    "false_positive_count": 0,
+    "fraud_approved_count": 73,
+    "fraud_capture_rate": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "review_capacity_utilization": 0.0
+  },
+  "binary_050": {
+    "review_threshold": 0.5,
+    "block_threshold": 0.5,
+    "total_expected_cost": 12103.02,
+    "cost_per_transaction": 20.1717,
+    "review_count": 0,
+    "block_count": 0,
+    "approve_count": 600,
+    "legitimate_block_count": 0,
+    "false_positive_count": 0,
+    "fraud_approved_count": 73,
+    "fraud_capture_rate": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "review_capacity_utilization": 0.0
+  },
+  "limitations": "No reliable timestamp or customer identifier; stratified random partitions are not temporal evidence."
+}

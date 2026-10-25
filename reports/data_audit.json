@@ -1,0 +1,71 @@
+{
+  "source": "transaction_fraud_risk_advanced_dataset.csv",
+  "shape": [
+    3000,
+    25
+  ],
+  "fraud_counts": {
+    "0": 2636,
+    "1": 364
+  },
+  "missing": {
+    "transaction_id": 0,
+    "hour": 0,
+    "day_of_week": 0,
+    "transaction_amount": 53,
+    "distance_from_usual_location_km": 75,
+    "transactions_last_1h": 0,
+    "transactions_last_24h": 0,
+    "account_age_days": 0,
+    "failed_logins_24h": 0,
+    "prior_chargebacks": 0,
+    "device_age_days": 0,
+    "merchant_risk_score": 60,
+    "ip_risk_score": 45,
+    "email_age_days": 0,
+    "login_to_transaction_minutes": 60,
+    "card_presence": 0,
+    "channel": 0,
+    "country": 0,
+    "device_type": 0,
+    "merchant_category": 0,
+    "authentication_level": 289,
+    "new_device": 0,
+    "billing_address_mismatch": 0,
+    "customer_tier": 0,
+    "fraud": 0
+  },
+  "duplicates": 0,
+  "duplicate_ids": 0,
+  "partitions": {
+    "train": {
+      "rows": 1500,
+      "fraud": 182
+    },
+    "selection": {
+      "rows": 450,
+      "fraud": 55
+    },
+    "calibration_fit": {
+      "rows": 225,
+      "fraud": 27
+    },
+    "policy_selection": {
+      "rows": 225,
+      "fraud": 27
+    },
+    "test": {
+      "rows": 600,
+      "fraud": 73
+    }
+  },
+  "validation_limit": "No reliable timestamp or customer identifier; stratified random partitions are not temporal evidence.",
+  "availability_questions": [
+    "prior_chargebacks",
+    "transactions_last_1h",
+    "transactions_last_24h",
+    "merchant_risk_score",
+    "ip_risk_score",
+    "distance_from_usual_location_km"
+  ]
+}
