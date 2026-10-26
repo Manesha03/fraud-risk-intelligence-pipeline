@@ -2,27 +2,27 @@
   "selected_model": "logistic_plain_base",
   "calibration": "sigmoid",
   "policy": {
-    "review": 0.12419255718131021,
-    "block": 0.1329095354664825
+    "review": 0.12419255718132183,
+    "block": 0.13290953546649942
   },
   "selection_metrics": {
     "roc_auc": 0.6603452243958572,
     "average_precision": 0.28911517346764026,
-    "brier": 0.10104377040590894,
-    "log_loss": 0.3650752137587634
+    "brier": 0.10104377040591067,
+    "log_loss": 0.36507521375870866
   },
   "calibration_metrics": {
     "method": "sigmoid",
     "roc_auc": 0.6389824167601944,
     "average_precision": 0.22078956184848186,
-    "brier": 0.1041836384948227,
-    "log_loss": 0.3604638404493773
+    "brier": 0.10418363849482208,
+    "log_loss": 0.3604638404493748
   },
   "test_metrics": {
     "roc_auc": 0.6514777364768267,
     "average_precision": 0.21101291795049917,
-    "brier": 0.10527934587963808,
-    "log_loss": 0.363215584720544,
+    "brier": 0.10527934587963679,
+    "log_loss": 0.3632155847205391,
     "precision_at_review": 0.20253164556962025,
     "recall_at_review": 0.4383561643835616,
     "f1_at_review": 0.27705627705627706,
@@ -38,8 +38,8 @@
     ]
   },
   "test_policy": {
-    "review_threshold": 0.12419255718131021,
-    "block_threshold": 0.1329095354664825,
+    "review_threshold": 0.12419255718132183,
+    "block_threshold": 0.13290953546649942,
     "total_expected_cost": 9114.926,
     "cost_per_transaction": 15.191543333333332,
     "review_count": 66,
