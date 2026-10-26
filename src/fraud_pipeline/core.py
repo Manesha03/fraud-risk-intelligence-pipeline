@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +81,22 @@ def metrics(y: np.ndarray, p: np.ndarray) -> dict:
     return {"roc_auc": float(roc_auc_score(y, p)), "average_precision": float(average_precision_score(y, p)), "brier": float(brier_score_loss(y, p)), "log_loss": float(log_loss(y, np.clip(p, 1e-8, 1-1e-8)))}
 
 
+def calibration_diagnostics(y: np.ndarray, p: np.ndarray) -> dict:
+    """Probability-scale bias, logistic slope, and quantile-bin calibration error."""
+    actual = np.asarray(y, dtype=int)
+    probability = np.asarray(p, dtype=float)
+    if len(actual) != len(probability) or not np.isfinite(probability).all() or ((probability < 0) | (probability > 1)).any():
+        raise ValueError("Invalid calibration inputs")
+    clipped = np.clip(probability,1e-6,1-1e-6)
+    logit = np.log(clipped / (1-clipped)).reshape(-1,1)
+    slope = float(LogisticRegression(C=1e6,max_iter=1000).fit(logit,actual).coef_[0,0]) if len(np.unique(actual)) == 2 else None
+    bands = pd.DataFrame({"actual":actual,"probability":probability})
+    bands["band"] = pd.qcut(bands.probability,8,duplicates="drop")
+    grouped = bands.groupby("band",observed=True).agg(count=("actual","size"),observed=("actual","mean"),predicted=("probability","mean"))
+    ece = float((grouped["count"] * (grouped["observed"]-grouped["predicted"]).abs()).sum()/len(actual))
+    return {"calibration_in_large":float(actual.mean()-probability.mean()),"calibration_slope":slope,"expected_calibration_error":ece}
+
+
 class SigmoidCalibrator:
     """Importable sigmoid probability mapping for serialized inference."""
 
@@ -114,15 +130,25 @@ class Policy:
 def realized_cost(y: np.ndarray, amount: np.ndarray, decisions: np.ndarray, cfg: dict) -> np.ndarray:
     """Counterfactual expected cost conditional on observed label; all money assumptions are hypothetical."""
     y = np.asarray(y, dtype=int)
-    a = np.nan_to_num(np.asarray(amount, dtype=float), nan=0).clip(min=0)
+    raw_amount = np.asarray(amount, dtype=float)
+    if np.isinf(raw_amount).any() or (raw_amount < 0).any():
+        raise ValueError("Transaction amounts must be nonnegative or missing")
+    a = np.where(np.isnan(raw_amount), cfg["missing_amount_fraud_loss"], raw_amount)
     approve = y * a * cfg["fraud_loss_multiplier"]
     review = cfg["review_cost"] + (1-y)*cfg["legitimate_review_friction"] + y*(1-cfg["review_success"])*a*cfg["fraud_loss_multiplier"]
     block = y*cfg["fraud_block_cost"] + (1-y)*cfg["legitimate_block_cost"]
     return np.select([decisions == "APPROVE", decisions == "REVIEW", decisions == "BLOCK"], [approve, review, block], default=np.nan)
 
 
-def policy_stats(y: np.ndarray, p: np.ndarray, amount: np.ndarray, policy: Policy, cfg: dict) -> dict:
+def operational_decisions(p: np.ndarray, amount: np.ndarray, policy: Policy) -> np.ndarray:
+    """Route an otherwise approved transaction with unknown amount to review."""
     decisions = policy.decide(p)
+    missing_amount = np.isnan(np.asarray(amount, dtype=float))
+    return np.where(missing_amount & (decisions == "APPROVE"), "REVIEW", decisions)
+
+
+def policy_stats(y: np.ndarray, p: np.ndarray, amount: np.ndarray, policy: Policy, cfg: dict, force_missing_review: bool = True) -> dict:
+    decisions = operational_decisions(p, amount, policy) if force_missing_review else policy.decide(p)
     fraud = np.asarray(y) == 1
     legitimate = ~fraud
     caught = fraud & (decisions == "BLOCK")
@@ -145,11 +171,18 @@ def search_policy(y: np.ndarray, p: np.ndarray, amount: np.ndarray, cfg: dict) -
 
 def predict(df: pd.DataFrame, model, calibrator, policy: Policy, cfg: dict, version: str = "1.0") -> pd.DataFrame:
     x = features(df)
+    missing_model_fields = set(model.feature_names_in_) - set(x.columns)
+    if missing_model_fields:
+        raise ValueError(f"Missing model fields: {sorted(missing_model_fields)}")
     raw = model.predict_proba(x)[:, 1]
     probability = calibrator.predict(raw)
-    decisions = policy.decide(probability)
     amount = df.transaction_amount.to_numpy(dtype=float)
-    a = np.nan_to_num(amount, nan=0).clip(min=0)
+    if np.isinf(amount).any() or (amount < 0).any():
+        raise ValueError("Transaction amounts must be nonnegative or missing")
+    decisions = operational_decisions(probability, amount, policy)
+    a = np.where(np.isnan(amount), cfg["missing_amount_fraud_loss"], amount)
     expected = np.where(decisions == "APPROVE", probability*a*cfg["fraud_loss_multiplier"], np.where(decisions == "REVIEW", cfg["review_cost"]+(1-probability)*cfg["legitimate_review_friction"]+probability*(1-cfg["review_success"])*a*cfg["fraud_loss_multiplier"], probability*cfg["fraud_block_cost"]+(1-probability)*cfg["legitimate_block_cost"]))
-    warnings = np.where(df.isna().any(axis=1), "missing_input_imputed", "")
-    return pd.DataFrame({"transaction_id":df[ID].values,"fraud_probability":probability,"decision":decisions,"reason_code":np.where(decisions=="APPROVE", "", "MODEL_RISK_THRESHOLD"),"model_version":version,"data_warning":warnings,"expected_cost_estimate":expected})
+    warnings = np.where(np.isnan(amount), "missing_amount_review_required", np.where(df.isna().any(axis=1), "missing_input_imputed", ""))
+    reasons = np.where(np.isnan(amount) & (decisions == "REVIEW"), "MISSING_TRANSACTION_AMOUNT", np.where(decisions == "APPROVE", "", "MODEL_RISK_THRESHOLD"))
+    scored_at = datetime.now(timezone.utc).isoformat()
+    return pd.DataFrame({"transaction_id":df[ID].values,"scored_at_utc":scored_at,"fraud_probability":probability,"decision":decisions,"reason_code":reasons,"model_version":version,"data_warning":warnings,"expected_cost_estimate":expected})

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -14,16 +16,16 @@ from matplotlib.backends.backend_pdf import PdfPages
 import nbformat
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import PrecisionRecallDisplay, confusion_matrix, f1_score, precision_score, recall_score
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, train_test_split
 from sklearn.inspection import permutation_importance
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from fraud_pipeline.core import ENGINEERED, Policy, SigmoidCalibrator, features, make_model, metrics, policy_stats, predict, read_data, search_policy
+from fraud_pipeline.core import ENGINEERED, Policy, SigmoidCalibrator, calibration_diagnostics, features, make_model, metrics, operational_decisions, policy_stats, predict, read_data, search_policy
 
 
 def figure(title, fn):
@@ -37,6 +39,7 @@ def figure(title, fn):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default=str(ROOT / "data" / "raw" / "transaction_fraud_risk_advanced_dataset.csv"))
+    parser.add_argument("--skip-notebook", action="store_true", help="Used when a notebook rebuilds missing analysis outputs")
     args = parser.parse_args()
     df = read_data(args.data)
     cfg = json.loads((ROOT / "configs" / "cost.json").read_text())
@@ -49,6 +52,18 @@ def main():
     cal_fit, policy_set = train_test_split(calibration, test_size=.5, stratify=calibration.fraud, random_state=45)
     partitions = {"train":train,"selection":select,"calibration_fit":cal_fit,"policy_selection":policy_set,"test":test}
     audit = {"source":str(Path(args.data).name),"shape":list(df.shape),"fraud_counts":df.fraud.value_counts().to_dict(),"missing":df.isna().sum().to_dict(),"duplicates":int(df.duplicated().sum()),"duplicate_ids":int(df.transaction_id.duplicated().sum()),"partitions":{k:{"rows":len(v),"fraud":int(v.fraud.sum())} for k,v in partitions.items()},"validation_limit":"No reliable timestamp or customer identifier; stratified random partitions are not temporal evidence.","availability_questions":["prior_chargebacks","transactions_last_1h","transactions_last_24h","merchant_risk_score","ip_risk_score","distance_from_usual_location_km"]}
+    audit["dtypes"] = {column:str(dtype) for column,dtype in df.dtypes.items()}
+    audit["cardinality"] = {column:int(count) for column,count in df.nunique(dropna=True).items()}
+    audit["high_cardinality"] = [column for column,count in audit["cardinality"].items() if count > 50]
+    audit["numeric_quantiles_train"] = {column:{str(q):float(value) for q,value in train[column].quantile([.01,.5,.99]).items()} for column in train.select_dtypes(include="number") if column != "fraud"}
+    audit["missingness_vs_fraud_train"] = {}
+    for column in train:
+        missing = train[column].isna()
+        if missing.any():
+            audit["missingness_vs_fraud_train"][column] = {"missing_count":int(missing.sum()),"fraud_rate_missing":float(train.loc[missing,"fraud"].mean()),"fraud_rate_present":float(train.loc[~missing,"fraud"].mean())}
+    audit["impossible_or_inconsistent"] = {"negative_amount":int(df.transaction_amount.lt(0).sum()),"negative_distance":int(df.distance_from_usual_location_km.lt(0).sum()),"invalid_hour":int((~df.hour.between(0,23)).sum()),"invalid_weekday":int((~df.day_of_week.between(0,6)).sum()),"hourly_count_exceeds_daily":int(df.transactions_last_1h.gt(df.transactions_last_24h).sum())}
+    audit["cleaning_decisions"] = ["No rows excluded for extreme values.","Training-fold numeric medians and categorical modes impute model inputs.","Missing transaction amount routes an otherwise approved transaction to review and uses the configured hypothetical fallback loss for cost accounting."]
+    audit["leakage_review"] = {"prohibited_inputs":["fraud","transaction_id"],"availability_unverified":audit["availability_questions"],"label_delay":"Unknown: no label timestamp supplied","timezone":"Unknown: hour and weekday have no timezone metadata"}
     (reports / "data_audit.json").write_text(json.dumps(audit, indent=2))
     xtrain, xselect, xcal, xpolicy, xtest = [features(partitions[k]) for k in partitions]
     ytrain, yselect, ycal, ypolicy, ytest = [partitions[k].fraud.to_numpy() for k in partitions]
@@ -61,19 +76,48 @@ def main():
                 model.fit(xtrain[cols], ytrain)
                 p = model.predict_proba(xselect[cols])[:, 1]
                 candidates.append({"name":f"{kind}_{'weighted' if weighted else 'plain'}_{'engineered' if engineered else 'base'}","model":model,"columns":cols,"selection":metrics(yselect,p)})
+    base_cols = [c for c in xtrain if c not in ENGINEERED]
+    folds = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    search = RandomizedSearchCV(
+        make_model(xtrain[base_cols], "logistic"),
+        {"model__C":[0.03,0.1,0.3,1.0,3.0,10.0]},
+        n_iter=6, scoring="average_precision", cv=folds, refit=True,
+        random_state=42, n_jobs=1, return_train_score=False,
+    )
+    search.fit(xtrain[base_cols], ytrain)
+    cv_table = pd.DataFrame(search.cv_results_)[["param_model__C","mean_test_score","std_test_score","split0_test_score","split1_test_score","split2_test_score"]]
+    cv_table.to_csv(reports / "stratified_cv_tuning.csv", index=False)
+    fold_importance = []
+    for fold_number,(fit_idx,validation_idx) in enumerate(folds.split(xtrain[base_cols],ytrain),1):
+        fold_model = clone(search.best_estimator_)
+        fold_model.fit(xtrain.iloc[fit_idx][base_cols],ytrain[fit_idx])
+        scores = permutation_importance(fold_model,xtrain.iloc[validation_idx][base_cols],ytrain[validation_idx],n_repeats=2,random_state=42,scoring="average_precision")
+        fold_importance.extend({"fold":fold_number,"feature":feature,"ap_drop":float(value)} for feature,value in zip(base_cols,scores.importances_mean))
+    pd.DataFrame(fold_importance).to_csv(reports / "feature_importance_folds.csv",index=False)
+    candidates.append({"name":"logistic_tuned_base","model":search.best_estimator_,"columns":base_cols,"selection":metrics(yselect,search.predict_proba(xselect[base_cols])[:,1])})
+    fraud_rows = train[train.fraud.eq(1)]
+    legitimate_rows = train[train.fraud.eq(0)].sample(n=min(len(train)-len(fraud_rows),3*len(fraud_rows)),random_state=42)
+    undersampled = pd.concat([fraud_rows, legitimate_rows]).sample(frac=1,random_state=42)
+    undersampled_model = make_model(xtrain[base_cols],"logistic")
+    undersampled_model.fit(features(undersampled)[base_cols],undersampled.fraud.to_numpy())
+    candidates.append({"name":"logistic_undersampled_base","model":undersampled_model,"columns":base_cols,"selection":metrics(yselect,undersampled_model.predict_proba(xselect[base_cols])[:,1])})
     table = pd.DataFrame([{"name":c["name"],**c["selection"]} for c in candidates]).sort_values("average_precision", ascending=False)
     table.to_csv(reports / "model_comparison.csv", index=False)
+    table[table.name.isin(["logistic_plain_base","logistic_weighted_base","logistic_undersampled_base"])].to_csv(reports / "imbalance_comparison.csv",index=False)
     best_name = table.iloc[0]["name"]
     best = next(c for c in candidates if c["name"] == best_name)
     model, cols = best["model"], best["columns"]
     raw_cal = model.predict_proba(xcal[cols])[:,1]
     calibrators = {"sigmoid":SigmoidCalibrator().fit(raw_cal,ycal),"isotonic":IsotonicRegression(out_of_bounds="clip").fit(raw_cal,ycal)}
     raw_policy = model.predict_proba(xpolicy[cols])[:,1]
-    cal_scores = pd.DataFrame([{"method":name,**metrics(ypolicy,cal.predict(raw_policy))} for name,cal in calibrators.items()]).sort_values("brier")
+    cal_scores = pd.DataFrame([{"method":name,**metrics(ypolicy,cal.predict(raw_policy)),**calibration_diagnostics(ypolicy,cal.predict(raw_policy))} for name,cal in calibrators.items()]).sort_values("brier")
     cal_scores.to_csv(reports / "calibration_comparison.csv", index=False)
     cal_name = cal_scores.iloc[0]["method"]
     calibrator = calibrators[cal_name]
     pcal = calibrator.predict(raw_policy)
+    calibration_bands = pd.DataFrame({"observed":ypolicy,"probability":pcal})
+    calibration_bands["risk_band"] = pd.cut(calibration_bands.probability,bins=[0,.05,.1,.15,.2,.3,.5,1],include_lowest=True)
+    calibration_bands.groupby("risk_band",observed=True).agg(count=("observed","size"),fraud_rate=("observed","mean"),mean_probability=("probability","mean")).to_csv(reports / "calibration_risk_bands.csv")
     amount_cal = policy_set.transaction_amount.to_numpy(dtype=float)
     scenarios = {"base":cfg,"higher_fraud_loss":{**cfg,"fraud_loss_multiplier":2},"higher_block_friction":{**cfg,"legitimate_block_cost":50},"lower_review_success":{**cfg,"review_success":.6},"higher_review_cost":{**cfg,"review_cost":6}}
     grids = []
@@ -85,6 +129,8 @@ def main():
         grids.append(grid)
     threshold_table = pd.concat(grids,ignore_index=True)
     threshold_table.to_csv(ROOT / "threshold_cost_analysis.csv",index=False)
+    sensitivity = pd.concat([grid[grid.capacity_ok].nsmallest(1,"total_expected_cost") for grid in grids],ignore_index=True)
+    sensitivity.to_csv(reports / "cost_sensitivity.csv",index=False)
     valid = grids[0].query("capacity_ok").sort_values("total_expected_cost")
     chosen = valid.iloc[0]
     policy = Policy(float(chosen.review_threshold),float(chosen.block_threshold))
@@ -92,12 +138,14 @@ def main():
     joblib.dump({"calibrator":calibrator,"method":cal_name,"policy":policy,"cost":cfg},ROOT / "calibrated_model.joblib")
     ptest = calibrator.predict(model.predict_proba(xtest[cols])[:,1])
     test_metrics = metrics(ytest,ptest)
+    test_metrics.update(calibration_diagnostics(ytest,ptest))
     test_stats = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),policy,cfg)
-    test_decisions = policy.decide(ptest)
+    test_decisions = operational_decisions(ptest,test.transaction_amount.to_numpy(dtype=float),policy)
     test_metrics.update({"precision_at_review":float(precision_score(ytest,test_decisions!="APPROVE",zero_division=0)),"recall_at_review":float(recall_score(ytest,test_decisions!="APPROVE",zero_division=0)),"f1_at_review":float(f1_score(ytest,test_decisions!="APPROVE",zero_division=0)),"confusion_at_review":confusion_matrix(ytest,test_decisions!="APPROVE").tolist()})
-    baseline = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(1,1),cfg)
-    binary = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(.5,.5),cfg)
-    summary = {"selected_model":best_name,"calibration":cal_name,"policy":{"review":policy.review,"block":policy.block},"selection_metrics":best["selection"],"calibration_metrics":cal_scores.iloc[0].to_dict(),"test_metrics":test_metrics,"test_policy":test_stats,"approve_all":baseline,"binary_050":binary,"limitations":audit["validation_limit"]}
+    baseline = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(1,1),cfg,force_missing_review=False)
+    binary = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(.5,.5),cfg,force_missing_review=False)
+    review_only = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(policy.review,1),cfg)
+    summary = {"selected_model":best_name,"calibration":cal_name,"policy":{"review":policy.review,"block":policy.block},"selection_metrics":best["selection"],"calibration_metrics":cal_scores.iloc[0].to_dict(),"stratified_cv_best_C":float(search.best_params_["model__C"]),"stratified_cv_ap_mean":float(search.best_score_),"test_metrics":test_metrics,"test_policy":test_stats,"approve_all":baseline,"binary_050":binary,"review_only":review_only,"limitations":audit["validation_limit"]}
     (reports / "results.json").write_text(json.dumps(summary,indent=2))
     processed = df.drop(columns=["fraud"]).join(features(df)[ENGINEERED]).assign(fraud=df.fraud)
     processed.to_csv(ROOT / "processed_dataset.csv",index=False)
@@ -125,17 +173,29 @@ def main():
         ("velocity_plus_2",test.assign(transactions_last_1h=test.transactions_last_1h+2)),
         ("missing_amount_10pct",test.copy()),
         ("unseen_channel",test.assign(channel="Novel channel")),
+        ("ecommerce_channel_mix",test.assign(channel="E-commerce")),
+        ("extreme_top_amounts",test.copy()),
     ]:
         if name=="missing_amount_10pct":
             chosen_rows=np.random.default_rng(42).choice(changed.index,size=max(1,len(changed)//10),replace=False)
             changed.loc[chosen_rows,"transaction_amount"]=np.nan
+        if name=="extreme_top_amounts":
+            chosen_rows=changed.transaction_amount.nlargest(max(1,len(changed)//100)).index
+            changed.loc[chosen_rows,"transaction_amount"] *= 10
         try:
             score=calibrator.predict(model.predict_proba(features(changed)[cols])[:,1])
             stat=policy_stats(ytest,score,test.transaction_amount.to_numpy(dtype=float),policy,cfg)
             stress_rows.append({"scenario":name,**metrics(ytest,score),**stat,"failed":0})
         except Exception:
             stress_rows.append({"scenario":name,"failed":len(changed)})
-    pd.DataFrame(stress_rows).to_csv(reports/"robustness.csv",index=False)
+    weights = np.where(ytest == 1,2.0,1.0)
+    selected_rows = np.random.default_rng(42).choice(len(test),size=len(test),replace=True,p=weights/weights.sum())
+    shifted = test.iloc[selected_rows]
+    shifted_y = shifted.fraud.to_numpy()
+    shifted_score = calibrator.predict(model.predict_proba(features(shifted)[cols])[:,1])
+    stress_rows.append({"scenario":"fraud_prevalence_weight_2x",**metrics(shifted_y,shifted_score),**policy_stats(shifted_y,shifted_score,shifted.transaction_amount.to_numpy(dtype=float),policy,cfg),"failed":0})
+    stress_table = pd.DataFrame(stress_rows)
+    stress_table.to_csv(reports/"robustness.csv",index=False)
     figures=[]
     figures.append(figure("Class counts, full supplied data",lambda ax:df.fraud.value_counts().sort_index().plot.bar(ax=ax)))
     figures.append(figure("Missing values by field",lambda ax:df.isna().sum().sort_values().tail(12).plot.barh(ax=ax)))
@@ -158,12 +218,12 @@ def main():
     pages=[("Executive summary",[f"Supplied dataset: {len(df):,} transactions; fraud prevalence {df.fraud.mean():.1%}.",f"Selected: {best_name}; {cal_name} calibration.",f"Test AP {test_metrics['average_precision']:.3f}; ROC-AUC {test_metrics['roc_auc']:.3f}.","Costs and review outcomes below are hypothetical, not observed business outcomes."],0),
     ("Data and quality",[f"Missing authentication: {df.authentication_level.isna().sum()}; amount: {df.transaction_amount.isna().sum()}.","No event timestamp or customer key: temporal and historical evaluation unavailable.","Prior chargebacks and upstream risk scores require authorization-time verification."],1),
     ("Fraud patterns",["Charts show training-partition associations, not causal effects.","Small cells and missing categories require caution."],3),
-    ("Model comparison",[table.head(6).round(3).to_string(index=False),"Selection used a disjoint development partition; no temporal claim."],None),
+    ("Model comparison",[table.head(6).round(3).to_string(index=False),f"Best stratified CV AP {search.best_score_:.3f}; C={search.best_params_['model__C']}.","Selection and CV are not temporal evidence."],None),
     ("Calibration",[cal_scores.round(4).to_string(index=False),"Calibrators were fitted on a separate calibration-fit partition.","Method comparison and policy search share the policy-selection partition."],12),
-    ("Cost policy",[f"Review >= {policy.review:.4f}; block >= {policy.block:.4f}.",f"Review labor {cfg['review_cost']}; legitimate block {cfg['legitimate_block_cost']}; review success {cfg['review_success']:.0%}.","Threshold search uses calibration labels; cost estimates are conditional simulation."],13),
-    ("Operational test simulation",[f"Review {test_stats['review_count']}; block {test_stats['block_count']}; legitimate blocks {test_stats['legitimate_block_count']}.",f"Policy cost {test_stats['total_expected_cost']:.2f}; approve-all {baseline['total_expected_cost']:.2f}; 0.50 binary {binary['total_expected_cost']:.2f}.",f"Fraud capture assumption-adjusted: {test_stats['fraud_capture_rate']:.1%}.","Review capacity is a per-batch fraction, not a staffed SLA."],None),
+    ("Cost policy",[f"Review >= {policy.review:.4f}; block >= {policy.block:.4f}.",f"Review labor {cfg['review_cost']}; legitimate block {cfg['legitimate_block_cost']}; review success {cfg['review_success']:.0%}.",f"Missing amount: REVIEW fallback; assumed fraud loss {cfg['missing_amount_fraud_loss']}.","Sensitivity results: see reports/cost_sensitivity.csv."],13),
+    ("Operational test simulation",[f"Review {test_stats['review_count']}; block {test_stats['block_count']}; legitimate blocks {test_stats['legitimate_block_count']}.",f"Policy cost {test_stats['total_expected_cost']:.2f}; approve-all {baseline['total_expected_cost']:.2f}; review-only {review_only['total_expected_cost']:.2f}.",f"Fraud capture assumption-adjusted: {test_stats['fraud_capture_rate']:.1%}.","Review capacity is a per-batch fraction, not a staffed SLA."],None),
     ("Explainability",["Permutation importance and five local base-logit explanations are saved in reports/.","Sigmoid calibration changes the probability scale; logit contributions are not calibrated-probability contributions.","Neither importance nor local contributions establish causality."],None),
-    ("Robustness and monitoring",["No temporal or external validation is possible with supplied fields.","Monitor missingness, score drift, decision rates, review capacity and mature-label performance.","Stress results require timestamps, deployment data and independent fraud outcomes."],None),
+    ("Robustness and monitoring",[stress_table[["scenario","average_precision","review_count","cost_per_transaction"]].round(3).to_string(index=False),"Controlled perturbations retain the original labels; they are not real-world attacks.","Monitor missingness, score drift, review capacity and mature-label performance."],None),
     ("Recommendations",["Collect event timestamp, label timestamp, customer key and feature-availability lineage.","Validate review success and customer-friction economics with operations.","Run prospective shadow evaluation and governance approval before integration."],None)]
     with PdfPages(ROOT/"business_fraud_strategy.pdf") as pdf:
         for title,lines,chart in pages:
@@ -175,30 +235,50 @@ def main():
             pdf.savefig(fig);plt.close(fig)
     with PdfPages(ROOT/"model_card.pdf") as pdf:
         fig=plt.figure(figsize=(8.27,11.69));fig.text(.08,.94,"Fraud model card | version 1.0",fontsize=18,weight="bold")
-        lines=[f"Source: supplied transaction CSV; {len(df)} rows; target: fraud.","Intended use: research and offline decision simulation only.","Out of scope: live authorization without timestamp/lineage validation.",f"Model: {best_name}; calibration: {cal_name}.",f"Test ROC-AUC {test_metrics['roc_auc']:.3f}; AP {test_metrics['average_precision']:.3f}; Brier {test_metrics['brier']:.3f}.",f"Thresholds: review {policy.review:.4f}; block {policy.block:.4f}.",f"Hypothetical test cost/transaction: {test_stats['cost_per_transaction']:.2f}.","Split: stratified train/selection/calibration/test; no timestamp supplied.","Leakage concern: chargebacks, velocity and risk scores need point-in-time proof.","Missingness: median/mode imputation learned on train only.","Limitations: no temporal, external, fairness or real-world cost validation.","Human oversight: REVIEW cases require analyst disposition.","Monitor input quality, drift, decisions, mature-label precision and calibration.","Rollback on severe data failures or verified performance loss.","Joblib artifacts must only be loaded from trusted sources."]
+        lines=[f"Source: supplied transaction CSV; {len(df)} rows; target: fraud.","Intended use: research and offline decision simulation only.","Out of scope: live authorization without timestamp/lineage validation.",f"Model: {best_name}; calibration: {cal_name}.",f"Test ROC-AUC {test_metrics['roc_auc']:.3f}; AP {test_metrics['average_precision']:.3f}; Brier {test_metrics['brier']:.3f}.",f"Thresholds: review {policy.review:.4f}; block {policy.block:.4f}.",f"Hypothetical test cost/transaction: {test_stats['cost_per_transaction']:.2f}.",f"Missing amount fallback fraud loss: {cfg['missing_amount_fraud_loss']}; otherwise review.","Split: stratified train/selection/calibration/test; no timestamp supplied.","Leakage concern: chargebacks, velocity and risk scores need point-in-time proof.","Missingness: median/mode imputation learned on train only.","Limitations: no temporal, external, fairness or real-world cost validation.","Human oversight: REVIEW cases require analyst disposition.","Monitor input quality, drift, decisions, mature-label precision and calibration.","Rollback on severe data failures or verified performance loss.","Joblib artifacts must only be loaded from trusted sources."]
         fig.text(.08,.86,"\n\n".join(lines),fontsize=10,va="top",wrap=True);pdf.savefig(fig);plt.close(fig)
-    cells=[nbformat.v4.new_markdown_cell("# Fraud risk analysis\nSupplied data; hypothetical cost assumptions. No valid transaction timestamp exists, so results are not temporal validation."),
-           nbformat.v4.new_markdown_cell("## 1. Environment and reproducibility\nRun from the repository root with dependencies in `requirements.txt`. The experiment uses seed 42 plus documented split seeds 43-45."),
-           nbformat.v4.new_code_cell("%run scripts/run_analysis.py --data data/raw/transaction_fraud_risk_advanced_dataset.csv"),
-           nbformat.v4.new_code_cell("import json, pandas as pd\nfrom IPython.display import display, Image\naudit=json.load(open('reports/data_audit.json'))\nresults=json.load(open('reports/results.json'))\naudit"),
-           nbformat.v4.new_markdown_cell("## 2. Data audit and leakage\nSee the machine-readable audit above. Chargebacks, velocity, distance and upstream scores need proof of availability at authorization time. Transaction IDs and the target are excluded from fitting."),
-           nbformat.v4.new_code_cell("display(pd.DataFrame({'missing':audit['missing']}))\nfor i in range(1,4): display(Image(filename=f'reports/figure_{i:02d}.png'))"),
-           nbformat.v4.new_markdown_cell("## 3. Training-only exploratory analysis\nAssociations are descriptive. Interaction charts have small cells and should not be read causally."),
-           nbformat.v4.new_code_cell("for i in range(4,13): display(Image(filename=f'reports/figure_{i:02d}.png'))"),
-           nbformat.v4.new_markdown_cell("## 4. Feature engineering and validation\nRow-local features are defined in `fraud_pipeline.core.features`. No customer history is reconstructed without customer IDs and timestamps. Stratified train, selection, calibration-fit, policy-selection and test partitions are disjoint."),
-           nbformat.v4.new_code_cell("display(pd.DataFrame(audit['partitions']).T)"),
-           nbformat.v4.new_markdown_cell("## 5. Baseline, nonlinear models and imbalance\nUnweighted and class-weighted logistic, random forest and extra trees models are compared with baseline and engineered features. Selection uses average precision."),
-           nbformat.v4.new_code_cell("display(pd.read_csv('reports/model_comparison.csv'))\ndisplay(pd.read_csv('reports/feature_importance.csv').head(12))"),
-           nbformat.v4.new_markdown_cell("## 6. Calibration\nSigmoid and isotonic calibrators fit on calibration-fit rows and are compared on policy-selection rows. These methods change probability interpretation, while ROC-AUC chiefly measures ranking."),
-           nbformat.v4.new_code_cell("display(pd.read_csv('reports/calibration_comparison.csv'))\ndisplay(Image(filename='reports/figure_14.png'))"),
-           nbformat.v4.new_markdown_cell("## 7. Cost optimization and operations\nCosts are assumptions from `configs/cost.json`. Policy search is capacity constrained. The final test simulates outcomes after policy selection."),
-           nbformat.v4.new_code_cell("display(pd.read_csv('threshold_cost_analysis.csv').groupby('cost_scenario').apply(lambda x:x[x.capacity_ok].nsmallest(1,'total_expected_cost')).reset_index(drop=True))\ndisplay(results['test_policy'])"),
-           nbformat.v4.new_markdown_cell("## 8. Explainability and robustness\nPermutation importance describes model dependence, not causality. Local reason codes denote threshold routing only. Controlled perturbations retain original labels and do not emulate adaptive fraud."),
-           nbformat.v4.new_code_cell("display(pd.read_csv('reports/robustness.csv'))\ndisplay(pd.read_csv('reports/local_explanations.csv'))"),
-           nbformat.v4.new_markdown_cell("## 9. Final test, monitoring and limitations\nMonitor input quality, unknown categories, score and decision rates, mature-label precision and calibration, and review capacity. There is no defensible claim of temporal stability, causal effects, real financial savings, fairness or deployment readiness without new data."),
-           nbformat.v4.new_code_cell("display(results['test_metrics'])\ndisplay(results['approve_all'])")]
-    notebook=nbformat.v4.new_notebook(cells=cells,metadata={"kernelspec":{"display_name":"Python 3","language":"python","name":"python3"}})
-    nbformat.write(notebook,ROOT/"fraud_risk_analysis.ipynb")
+    if not args.skip_notebook:
+        cells = []
+        def section(title, description, code=None):
+            cells.append(nbformat.v4.new_markdown_cell(f"## {title}\n{description}"))
+            if code:
+                cells.append(nbformat.v4.new_code_cell(code))
+
+        cells.append(nbformat.v4.new_markdown_cell("# Fraud risk analysis\nOffline assessment on supplied data. Costs and review outcomes are assumptions, not observed business results."))
+        section("1. Objective and assumptions", "Score fraud probability, simulate three decisions, and minimize hypothetical cost subject to review capacity. No event timestamps or customer keys are available.")
+        section("2. Environment and reproducibility", "Seeds 42-45 control splitting and models. Execute from the repository root; raw CSV belongs in `data/raw/`.", "from pathlib import Path\nimport json, pandas as pd, subprocess, sys\nprint('Python:', sys.version.split()[0])")
+        section("3. Dataset loading", "If analysis outputs are absent, this cell runs the pipeline without regenerating the open notebook.", "if not Path('reports/results.json').exists():\n    subprocess.run([sys.executable, 'scripts/run_analysis.py', '--skip-notebook'], check=True)\ndata = pd.read_csv('data/raw/transaction_fraud_risk_advanced_dataset.csv')\nprint('Shape:', data.shape, 'Fraud:', int(data.fraud.sum()))")
+        section("4. Data audit", "Schema, missingness, duplicate identifiers, and partition counts are machine-readable in `reports/data_audit.json`.", "audit = json.loads(Path('reports/data_audit.json').read_text())\nprint(pd.Series(audit['missing']).sort_values(ascending=False).head(12).to_string())\nprint(audit['partitions'])")
+        section("5. Leakage assessment", "`fraud` and transaction IDs are excluded. Chargebacks, velocity, distance, and upstream scores require point-in-time lineage proof before deployment.")
+        section("6. Exploratory analysis", "Charts use training rows for fraud patterns. Full-data quality charts are descriptive. Interaction cells may have small sample sizes.\n\n![Class distribution](reports/figure_01.png)\n\n![Missingness](reports/figure_02.png)\n\n![Channel fraud rates](reports/figure_04.png)\n\n![Device-distance interaction](reports/figure_10.png)\n\n![Merchant amount interaction](reports/figure_11.png)")
+        section("7. Feature engineering", "Thirteen row-local features are defined in `fraud_pipeline.core.features`; no customer-history statistic is inferred from future records.", "print(pd.read_csv('processed_dataset.csv', nrows=1).columns.tolist())")
+        section("8. Validation", "Stratified train, model-selection, calibrator-fit, policy-selection, and final-test partitions are disjoint. They are not temporal validation.", "print(pd.DataFrame(audit['partitions']).T.to_string())")
+        section("9. Baseline modeling", "Unweighted logistic regression with imputation, scaling, and one-hot encoding is the reference model.", "comparison = pd.read_csv('reports/model_comparison.csv')\nprint(comparison[comparison.name.eq('logistic_plain_base')].to_string(index=False))")
+        section("10. Nonlinear models", "Random forest and extra trees are compared under the same partition design.", "print(comparison[comparison.name.str.startswith(('forest','extra_trees'))].head(6).to_string(index=False))")
+        section("11. Hyperparameter tuning", "Logistic C is searched in three stratified training folds. These folds do not establish temporal stability.", "print(pd.read_csv('reports/stratified_cv_tuning.csv').to_string(index=False))")
+        section("12. Class imbalance", "Unweighted, class-weighted, and training-only undersampled logistic models are compared on untouched selection rows.", "print(pd.read_csv('reports/imbalance_comparison.csv').to_string(index=False))")
+        section("13. Calibration", "Sigmoid and isotonic mappings fit on calibration-fit rows and are compared on policy-selection rows.\n\n![Calibration](reports/figure_14.png)", "print(pd.read_csv('reports/calibration_comparison.csv').to_string(index=False))\nprint(pd.read_csv('reports/calibration_risk_bands.csv').to_string(index=False))")
+        section("14. Cost and threshold selection", "Joint threshold search uses hypothetical costs; missing amounts have an explicit fallback loss and cannot be automatically approved.\n\n![Cost by review threshold](reports/figure_15.png)", "thresholds = pd.read_csv('threshold_cost_analysis.csv')\nvalid = thresholds[thresholds.capacity_ok]\nprint(valid.loc[valid.groupby('cost_scenario').total_expected_cost.idxmin()][['cost_scenario','review_threshold','block_threshold','total_expected_cost']].to_string(index=False))")
+        section("15. Explainability", "Permutation importance and local base-model log-odds contributions are associations, not calibrated-probability or causal contributions. Fold importance is stratified, not temporal.", "print(pd.read_csv('reports/feature_importance.csv').head(10).to_string(index=False))\nprint(pd.read_csv('reports/feature_importance_folds.csv').groupby('feature').ap_drop.agg(['mean','std']).sort_values('mean',ascending=False).head(10).to_string())\nprint(pd.read_csv('reports/local_explanations.csv').head().to_string(index=False))")
+        section("16. Fraud operations", "Review success and financial impacts are simulated; compare approve-all, 0.50 binary, review-only, and the selected policy.", "results = json.loads(Path('reports/results.json').read_text())\nprint({k:round(results[k]['cost_per_transaction'],3) for k in ['approve_all','binary_050','review_only','test_policy']})")
+        section("17. Robustness", "Controlled perturbations retain labels and do not reproduce adaptive fraud.", "print(pd.read_csv('reports/robustness.csv')[['scenario','average_precision','cost_per_transaction','review_count','failed']].to_string(index=False))")
+        section("18. Final test", "The final partition was evaluated after model, calibration, and policy selection.\n\n![Precision-recall curve](reports/figure_13.png)", "print(json.dumps(results['test_metrics'], indent=2))\nprint(json.dumps(results['test_policy'], indent=2))")
+        section("19. Monitoring and governance", "Monitor missingness, unseen categories, score and decision rates, review capacity, mature-label precision, calibration, and realized loss. Human approval and rollback procedures are required before live use.")
+        section("20. Conclusions and limits", "The dataset lacks event and label timestamps, customer keys, feature lineage, actual review outcomes, verified costs, and a fairness audit. No future-period or production-performance claim is supported.")
+        notebook = nbformat.v4.new_notebook(cells=cells,metadata={"kernelspec":{"display_name":"Python 3","language":"python","name":"python3"}})
+        scope = {}
+        execution_count = 0
+        for cell in notebook.cells:
+            if cell.cell_type != "code":
+                continue
+            execution_count += 1
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exec(compile(cell.source,"fraud_risk_analysis.ipynb","exec"),scope)
+            cell.execution_count = execution_count
+            cell.outputs = [nbformat.v4.new_output("stream",name="stdout",text=output.getvalue())]
+        nbformat.validate(notebook)
+        nbformat.write(notebook,ROOT/"fraud_risk_analysis.ipynb")
     print(json.dumps(summary,indent=2))
 
 
