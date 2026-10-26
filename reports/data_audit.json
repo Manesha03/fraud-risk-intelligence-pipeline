@@ -67,5 +67,212 @@
     "merchant_risk_score",
     "ip_risk_score",
     "distance_from_usual_location_km"
-  ]
+  ],
+  "dtypes": {
+    "transaction_id": "str",
+    "hour": "int64",
+    "day_of_week": "int64",
+    "transaction_amount": "float64",
+    "distance_from_usual_location_km": "float64",
+    "transactions_last_1h": "int64",
+    "transactions_last_24h": "int64",
+    "account_age_days": "int64",
+    "failed_logins_24h": "int64",
+    "prior_chargebacks": "int64",
+    "device_age_days": "int64",
+    "merchant_risk_score": "float64",
+    "ip_risk_score": "float64",
+    "email_age_days": "int64",
+    "login_to_transaction_minutes": "float64",
+    "card_presence": "str",
+    "channel": "str",
+    "country": "str",
+    "device_type": "str",
+    "merchant_category": "str",
+    "authentication_level": "str",
+    "new_device": "int64",
+    "billing_address_mismatch": "int64",
+    "customer_tier": "str",
+    "fraud": "int64"
+  },
+  "cardinality": {
+    "transaction_id": 3000,
+    "hour": 24,
+    "day_of_week": 7,
+    "transaction_amount": 2779,
+    "distance_from_usual_location_km": 2402,
+    "transactions_last_1h": 11,
+    "transactions_last_24h": 25,
+    "account_age_days": 1464,
+    "failed_logins_24h": 4,
+    "prior_chargebacks": 4,
+    "device_age_days": 1283,
+    "merchant_risk_score": 658,
+    "ip_risk_score": 574,
+    "email_age_days": 2099,
+    "login_to_transaction_minutes": 1945,
+    "card_presence": 2,
+    "channel": 4,
+    "country": 7,
+    "device_type": 5,
+    "merchant_category": 10,
+    "authentication_level": 2,
+    "new_device": 2,
+    "billing_address_mismatch": 2,
+    "customer_tier": 4,
+    "fraud": 2
+  },
+  "high_cardinality": [
+    "transaction_id",
+    "transaction_amount",
+    "distance_from_usual_location_km",
+    "account_age_days",
+    "device_age_days",
+    "merchant_risk_score",
+    "ip_risk_score",
+    "email_age_days",
+    "login_to_transaction_minutes"
+  ],
+  "numeric_quantiles_train": {
+    "hour": {
+      "0.01": 0.0,
+      "0.5": 12.0,
+      "0.99": 23.0
+    },
+    "day_of_week": {
+      "0.01": 0.0,
+      "0.5": 3.0,
+      "0.99": 6.0
+    },
+    "transaction_amount": {
+      "0.01": 11.926,
+      "0.5": 90.02,
+      "0.99": 684.8579999999986
+    },
+    "distance_from_usual_location_km": {
+      "0.01": 2.9688,
+      "0.5": 30.95,
+      "0.99": 129.6599999999997
+    },
+    "transactions_last_1h": {
+      "0.01": 0.0,
+      "0.5": 2.0,
+      "0.99": 6.0
+    },
+    "transactions_last_24h": {
+      "0.01": 2.0,
+      "0.5": 7.0,
+      "0.99": 15.0
+    },
+    "account_age_days": {
+      "0.01": 21.990000000000002,
+      "0.5": 879.0,
+      "0.99": 1777.02
+    },
+    "failed_logins_24h": {
+      "0.01": 0.0,
+      "0.5": 0.0,
+      "0.99": 2.0
+    },
+    "prior_chargebacks": {
+      "0.01": 0.0,
+      "0.5": 0.0,
+      "0.99": 1.0
+    },
+    "device_age_days": {
+      "0.01": 18.990000000000002,
+      "0.5": 736.5,
+      "0.99": 1481.0
+    },
+    "merchant_risk_score": {
+      "0.01": 0.03667,
+      "0.5": 0.284,
+      "0.99": 0.7189799999999995
+    },
+    "ip_risk_score": {
+      "0.01": 0.01782,
+      "0.5": 0.198,
+      "0.99": 0.611
+    },
+    "email_age_days": {
+      "0.01": 31.990000000000002,
+      "0.5": 1969.0,
+      "0.99": 3930.12
+    },
+    "login_to_transaction_minutes": {
+      "0.01": 1.7608,
+      "0.5": 12.19,
+      "0.99": 80.21839999999972
+    },
+    "new_device": {
+      "0.01": 0.0,
+      "0.5": 0.0,
+      "0.99": 1.0
+    },
+    "billing_address_mismatch": {
+      "0.01": 0.0,
+      "0.5": 0.0,
+      "0.99": 1.0
+    }
+  },
+  "missingness_vs_fraud_train": {
+    "transaction_amount": {
+      "missing_count": 29,
+      "fraud_rate_missing": 0.06896551724137931,
+      "fraud_rate_present": 0.12236573759347383
+    },
+    "distance_from_usual_location_km": {
+      "missing_count": 35,
+      "fraud_rate_missing": 0.05714285714285714,
+      "fraud_rate_present": 0.12286689419795221
+    },
+    "merchant_risk_score": {
+      "missing_count": 32,
+      "fraud_rate_missing": 0.0,
+      "fraud_rate_present": 0.12397820163487738
+    },
+    "ip_risk_score": {
+      "missing_count": 17,
+      "fraud_rate_missing": 0.0,
+      "fraud_rate_present": 0.1227242076871207
+    },
+    "login_to_transaction_minutes": {
+      "missing_count": 31,
+      "fraud_rate_missing": 0.03225806451612903,
+      "fraud_rate_present": 0.12321307011572498
+    },
+    "authentication_level": {
+      "missing_count": 144,
+      "fraud_rate_missing": 0.20833333333333334,
+      "fraud_rate_present": 0.11209439528023599
+    }
+  },
+  "impossible_or_inconsistent": {
+    "negative_amount": 0,
+    "negative_distance": 0,
+    "invalid_hour": 0,
+    "invalid_weekday": 0,
+    "hourly_count_exceeds_daily": 0
+  },
+  "cleaning_decisions": [
+    "No rows excluded for extreme values.",
+    "Training-fold numeric medians and categorical modes impute model inputs.",
+    "Missing transaction amount routes an otherwise approved transaction to review and uses the configured hypothetical fallback loss for cost accounting."
+  ],
+  "leakage_review": {
+    "prohibited_inputs": [
+      "fraud",
+      "transaction_id"
+    ],
+    "availability_unverified": [
+      "prior_chargebacks",
+      "transactions_last_1h",
+      "transactions_last_24h",
+      "merchant_risk_score",
+      "ip_risk_score",
+      "distance_from_usual_location_km"
+    ],
+    "label_delay": "Unknown: no label timestamp supplied",
+    "timezone": "Unknown: hour and weekday have no timezone metadata"
+  }
 }

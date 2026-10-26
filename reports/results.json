@@ -16,48 +16,56 @@
     "roc_auc": 0.6389824167601944,
     "average_precision": 0.22078956184848186,
     "brier": 0.10418363849482208,
-    "log_loss": 0.3604638404493748
+    "log_loss": 0.3604638404493748,
+    "calibration_in_large": -0.001675747365967678,
+    "calibration_slope": 2.5669451134663186,
+    "expected_calibration_error": 0.061409045662213314
   },
+  "stratified_cv_best_C": 0.03,
+  "stratified_cv_ap_mean": 0.2213648186127227,
   "test_metrics": {
     "roc_auc": 0.6514777364768267,
     "average_precision": 0.21101291795049917,
     "brier": 0.10527934587963679,
     "log_loss": 0.3632155847205391,
-    "precision_at_review": 0.20253164556962025,
-    "recall_at_review": 0.4383561643835616,
-    "f1_at_review": 0.27705627705627706,
+    "calibration_in_large": 0.0013672538443398469,
+    "calibration_slope": 3.2972579347421753,
+    "expected_calibration_error": 0.048763866746419304,
+    "precision_at_review": 0.19883040935672514,
+    "recall_at_review": 0.4657534246575342,
+    "f1_at_review": 0.2786885245901639,
     "confusion_at_review": [
       [
-        401,
-        126
+        390,
+        137
       ],
       [
-        41,
-        32
+        39,
+        34
       ]
     ]
   },
   "test_policy": {
     "review_threshold": 0.12419255718132183,
     "block_threshold": 0.13290953546649942,
-    "total_expected_cost": 9114.926,
-    "cost_per_transaction": 15.191543333333332,
-    "review_count": 66,
+    "total_expected_cost": 9215.926,
+    "cost_per_transaction": 15.359876666666667,
+    "review_count": 79,
     "block_count": 92,
-    "approve_count": 442,
+    "approve_count": 429,
     "legitimate_block_count": 71,
-    "false_positive_count": 126,
-    "fraud_approved_count": 41,
-    "fraud_capture_rate": 0.40821917808219177,
-    "precision": 0.20253164556962025,
-    "recall": 0.4383561643835616,
-    "review_capacity_utilization": 0.7333333333333333
+    "false_positive_count": 137,
+    "fraud_approved_count": 39,
+    "fraud_capture_rate": 0.4301369863013698,
+    "precision": 0.19883040935672514,
+    "recall": 0.4657534246575342,
+    "review_capacity_utilization": 0.8777777777777778
   },
   "approve_all": {
     "review_threshold": 1,
     "block_threshold": 1,
-    "total_expected_cost": 12103.02,
-    "cost_per_transaction": 20.1717,
+    "total_expected_cost": 12303.02,
+    "cost_per_transaction": 20.505033333333333,
     "review_count": 0,
     "block_count": 0,
     "approve_count": 600,
@@ -72,8 +80,8 @@
   "binary_050": {
     "review_threshold": 0.5,
     "block_threshold": 0.5,
-    "total_expected_cost": 12103.02,
-    "cost_per_transaction": 20.1717,
+    "total_expected_cost": 12303.02,
+    "cost_per_transaction": 20.505033333333333,
     "review_count": 0,
     "block_count": 0,
     "approve_count": 600,
@@ -84,6 +92,22 @@
     "precision": 0.0,
     "recall": 0.0,
     "review_capacity_utilization": 0.0
+  },
+  "review_only": {
+    "review_threshold": 0.12419255718132183,
+    "block_threshold": 1,
+    "total_expected_cost": 8611.387999999999,
+    "cost_per_transaction": 14.352313333333331,
+    "review_count": 171,
+    "block_count": 0,
+    "approve_count": 429,
+    "legitimate_block_count": 0,
+    "false_positive_count": 137,
+    "fraud_approved_count": 39,
+    "fraud_capture_rate": 0.3726027397260274,
+    "precision": 0.19883040935672514,
+    "recall": 0.4657534246575342,
+    "review_capacity_utilization": 1.9
   },
   "limitations": "No reliable timestamp or customer identifier; stratified random partitions are not temporal evidence."
 }
