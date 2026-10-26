@@ -108,7 +108,7 @@ The implementation and configuration are in [core.py](src/fraud_pipeline/core.py
 
 **Prerequisites:** Python 3.10+ and the supplied `transaction_fraud_risk_advanced_dataset.csv`. The dataset's original provenance has not been independently verified.
 
-1. Create an environment and install the project dependencies:
+1. Create the environment once, then activate it and install dependencies:
 
    ```powershell
    python -m venv .venv
@@ -116,7 +116,15 @@ The implementation and configuration are in [core.py](src/fraud_pipeline/core.py
    pip install -r requirements.txt
    ```
 
-   On macOS/Linux, activate with `source .venv/bin/activate`.
+   If your prompt already begins with `(.venv)`, the environment is active: skip `python -m venv .venv` and activation, then run `python -m pip install -r requirements.txt`. Recreating an active environment can fail because `.venv\Scripts\python.exe` is in use. On macOS/Linux, activate with `source .venv/bin/activate`.
+
+   If pip reports `No matching distribution found` with `from versions: none` for pandas, retry with a longer index timeout:
+
+   ```powershell
+   python -m pip install -r requirements.txt --timeout 120 --retries 2
+   ```
+
+   The package index responded in this environment, but reading its listing timed out. If wheel downloads also stall, check access to both `pypi.org` and `files.pythonhosted.org`.
 
 2. Put the CSV at `data/raw/transaction_fraud_risk_advanced_dataset.csv`. Raw data is gitignored. You can instead pass a local path with `--data`.
 
