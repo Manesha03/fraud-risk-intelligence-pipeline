@@ -7,7 +7,6 @@ import io
 import json
 import sys
 import shutil
-import textwrap
 from pathlib import Path
 
 import joblib
@@ -159,11 +158,9 @@ def main():
     valid = grids[0].query("capacity_ok").sort_values("total_expected_cost")
     chosen = valid.iloc[0]
     policy = Policy(float(chosen.review_threshold),float(chosen.block_threshold))
-    joblib.dump({"model":model,"columns":cols,"version":"1.0","selection_metrics":best["selection"]}, ROOT / "fraud_model_pipeline.joblib")
-    joblib.dump(FraudModelPipeline(model), ROOT / "03_fraud_model_pipeline.joblib")
+    joblib.dump({"model":model,"pipeline":FraudModelPipeline(model),"columns":cols,"version":"1.0","selection_metrics":best["selection"]}, ROOT / "fraud_model_pipeline.joblib")
     engine = FraudDecisionEngine(model, calibrator, policy, cfg)
     joblib.dump({"calibrator":calibrator,"method":cal_name,"policy":policy,"cost":cfg,"engine":engine},ROOT / "calibrated_model.joblib")
-    joblib.dump(engine, ROOT / "04_calibrated_model.joblib")
     ptest = calibrator.predict(model.predict_proba(xtest[cols])[:,1])
     test_metrics = metrics(ytest,ptest)
     test_metrics.update(calibration_diagnostics(ytest,ptest))
@@ -252,40 +249,8 @@ def main():
                                    "interaction_merchant_risk_score_transaction_amount.png",
                                    "interaction_authentication_level_channel.png"], 10):
         shutil.copyfile(reports / name, reports / f"figure_{number:02d}.png")
-    # Each page contains measured results or explicitly labeled assumptions.
-    pages=[("Executive summary",[f"Supplied dataset: {len(df):,} transactions; fraud prevalence {df.fraud.mean():.1%}.",f"Selected: {best_name}; {cal_name} calibration.",f"Test AP {test_metrics['average_precision']:.3f}; ROC-AUC {test_metrics['roc_auc']:.3f}.","Costs and review outcomes below are hypothetical, not observed business outcomes."],0),
-    ("Data and quality",[f"Missing authentication: {df.authentication_level.isna().sum()}; amount: {df.transaction_amount.isna().sum()}.","No event timestamp or customer key: temporal and historical evaluation unavailable.","Prior chargebacks and upstream risk scores require authorization-time verification."],1),
-    ("Fraud patterns",["Charts show training-partition associations, not causal effects.","Small cells and missing categories require caution."],3),
-    ("Model comparison",[table.head(6).round(3).to_string(index=False),f"Best stratified CV AP {search.best_score_:.3f}; C={search.best_params_['model__C']}.","Selection and CV are not temporal evidence."],None),
-    ("Calibration",[cal_scores[["method","brier","log_loss","calibration_slope"]].round(4).to_string(index=False),"Calibrators were fitted on a separate calibration-fit partition.","Method comparison and policy search share the policy-selection partition.",f"Final regression-test calibration slope: {test_metrics['calibration_slope']:.2f} (ideal 1); fitted calibration is not proof of reliability."],13),
-    ("Cost policy",[f"Review >= {policy.review:.4f}; block >= {policy.block:.4f}.",f"Review labor {cfg['review_cost']}; legitimate block {cfg['legitimate_block_cost']}; review success {cfg['review_success']:.0%}.",f"Missing amount: REVIEW fallback; assumed fraud loss {cfg['missing_amount_fraud_loss']}.","Nine cost/capacity scenarios: see reports/cost_sensitivity.csv."],14),
-    ("Operational test simulation",[f"Review {test_stats['review_count']}; block {test_stats['block_count']}; legitimate blocks {test_stats['legitimate_block_count']}.",f"Policy cost {test_stats['total_expected_cost']:.2f}; approve-all {baseline['total_expected_cost']:.2f}; review-only {review_only['total_expected_cost']:.2f}.",f"Fraud capture assumption-adjusted: {test_stats['fraud_capture_rate']:.1%}.","Review capacity is a per-batch fraction, not a staffed SLA."],None),
-    ("Explainability",["Permutation importance and five local base-logit explanations are saved in reports/.","Sigmoid calibration changes the probability scale; logit contributions are not calibrated-probability contributions.","Neither importance nor local contributions establish causality."],None),
-    ("Robustness and monitoring",[stress_table[["scenario","average_precision","review_count","cost_per_transaction"]].round(3).to_string(index=False),"Controlled perturbations retain the original labels; they are not real-world attacks.","Monitor missingness, score drift, review capacity and mature-label performance."],None),
-    ("Recommendations",["Collect event timestamp, label timestamp, customer key and feature-availability lineage.","Validate review success and customer-friction economics with operations.","Run prospective shadow evaluation and governance approval before integration."],None)]
-    pages.extend([
-        ("Model economics and tradeoffs", ["Development comparisons; all candidates use sigmoid calibration for comparability.",
-          *[f"{row.cost_scenario}: {row.model}; cost/transaction {row.cost_per_transaction:.2f}" for row in winners.itertuples()],
-          "See assessment_answers.md for measured AP/cost reversals. These optimized development costs are exploratory."], None),
-        ("Predictors, interactions and uncertainty", [
-          "Leading selection permutation importances:", importance_table.head(5).round(4).to_string(index=False),
-          "Fold stability: candidate_cv_summary.csv and selected_baseline_importance_folds.csv.",
-          "Observed interaction contrasts (cells with at least 30 rows):",
-          pd.read_csv(reports / "interaction_effects.csv").round(3).to_string(index=False),
-          "Dependence plots show model associations; interventions may create uncommon combinations.",
-          "This test partition was inspected before this revision; a fresh external holdout is still required."], None)
-    ])
-    with PdfPages(ROOT/"business_fraud_strategy.pdf") as pdf:
-        for page_number,(title,lines,chart) in enumerate(pages, 1):
-            fig=plt.figure(figsize=(8.27,11.69));fig.text(.08,.94,title,fontsize=20,weight="bold")
-            wrapped = "\n\n".join("\n".join(textwrap.fill(line, 94) for line in paragraph.splitlines()) for paragraph in lines)
-            fig.text(.06,.87,wrapped,fontsize=8.3,va="top",family="monospace")
-            if chart is not None:
-                from matplotlib.image import imread
-                ax=fig.add_axes([.1,.1,.8,.38]);ax.imshow(imread(reports/f"figure_{chart+1:02d}.png"));ax.axis("off")
-            if page_number in (5, 9, 11, 12):
-                fig.savefig(reports / f"strategy_page_{page_number:02d}_preview.png", dpi=100)
-            pdf.savefig(fig);plt.close(fig)
+    from fraud_pipeline.business_report import build_business_report
+    build_business_report(ROOT)
     with PdfPages(ROOT/"model_card.pdf") as pdf:
         fig=plt.figure(figsize=(8.27,11.69));fig.text(.08,.94,"Fraud model card | version 1.0",fontsize=18,weight="bold")
         lines=[f"Source: supplied transaction CSV; {len(df)} rows; target: fraud.","Intended use: research and offline decision simulation only.","Out of scope: live authorization without timestamp/lineage validation.",f"Model: {best_name}; calibration: {cal_name}.",f"Test ROC-AUC {test_metrics['roc_auc']:.3f}; AP {test_metrics['average_precision']:.3f}; Brier {test_metrics['brier']:.3f}.",f"Thresholds: review {policy.review:.4f}; block {policy.block:.4f}.",f"Hypothetical test cost/transaction: {test_stats['cost_per_transaction']:.2f}.",f"Missing amount fallback fraud loss: {cfg['missing_amount_fraud_loss']}; otherwise review.","Split: stratified train/selection/calibration/test; no timestamp supplied.","Leakage concern: chargebacks, velocity and risk scores need point-in-time proof.","Missingness: median/mode imputation learned on train only.","Limitations: no temporal, external, fairness or real-world cost validation.","Human oversight: REVIEW cases require analyst disposition.","Monitor input quality, drift, decisions, mature-label precision and calibration.","Rollback on severe data failures or verified performance loss.","Joblib artifacts must only be loaded from trusted sources."]
@@ -334,15 +299,6 @@ def main():
             cell.outputs = [nbformat.v4.new_output("stream",name="stdout",text=output.getvalue())]
         nbformat.validate(notebook)
         nbformat.write(notebook,ROOT/"fraud_risk_analysis.ipynb")
-    # Exact requested submission names, alongside existing compatibility filenames.
-    for source, target in {"fraud_risk_analysis.ipynb": "01_fraud_risk_analysis.ipynb",
-                           "processed_dataset.csv": "02_processed_dataset.csv",
-                           "threshold_cost_analysis.csv": "05_threshold_cost_analysis.csv",
-                           "model_card.pdf": "06_model_card.pdf",
-                           "business_fraud_strategy.pdf": "07_business_fraud_strategy.pdf",
-                           "README.md": "08_README.md"}.items():
-        if (ROOT / source).exists():
-            shutil.copyfile(ROOT / source, ROOT / target)
     print(json.dumps(summary,indent=2))
 
 

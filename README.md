@@ -23,12 +23,12 @@ The selected thresholds are **0.1242 for review** and **0.1329 for block**, chos
 
 ### Project Highlights
 
-- **14 candidates:** logistic regression, random forest, and extra trees; original versus engineered features; unweighted, class-weighted, tuned, and training-only undersampled comparisons.
-- **13 derived features:** amount and merchant-risk interactions, device-distance interaction, velocity ratios, age flags, time indicators, and other row-local signals.
+- **16 candidates:** logistic regression, random forest, and extra trees; original versus engineered features; unweighted, class-weighted, tuned, and fit-only undersampled comparisons. All three model families have training-only hyperparameter search.
+- **18 derived features:** amount and merchant-risk interactions, device-distance interaction, velocity ratios, age flags, time indicators, and training-fold merchant amount normalization and channel distance deviation.
 - **Separated evaluation:** train, model selection, calibration fit, policy selection, and untouched final test partitions.
-- **Decision economics:** jointly optimized review/block thresholds, five illustrative cost scenarios, and a 15% review-capacity constraint.
-- **Analysis outputs:** 15 figures, stratified fold diagnostics, calibration bias/slope/risk bands, cost sensitivity, five local base-model explanations, controlled perturbations, an executed notebook, a model card, and a 10-page strategy report.
-- **Batch inference:** a separate command loads trusted artifacts and emits a UTC scoring timestamp, probability, decision, warning, version, and assumption-based expected cost.
+- **Decision economics:** jointly optimized review/block thresholds, nine illustrative cost scenarios, cross-model cost comparisons, recall/workload tradeoffs, and a 15% base review-capacity constraint.
+- **Analysis outputs:** 31 figures, candidate fold diagnostics, calibration bias/slope/risk bands, cost sensitivity, five sample local explanations, controlled perturbations, an executed notebook, a model card, and a 12-page strategy report.
+- **Batch inference:** a separate command loads one trusted scoring artifact and emits a UTC scoring timestamp, probability, decision, transaction-specific explanation for every review/block, warning, version, and assumption-based expected cost.
 
 ## Results at a Glance
 
@@ -51,6 +51,8 @@ The final test partition contains **600 transactions, including 73 fraud labels*
 The cost difference is a **counterfactual simulation conditional on the dataset labels**, not observed savings. Cost units have no verified currency. The base scenario assumes review labor cost 3, legitimate-review friction 2, legitimate-block cost 25, review interception success of 80%, and capacity for reviews equal to 15% of transactions. A missing amount triggers review and uses a **hypothetical loss amount of 100** for accounting; this is not an observed loss. See [cost configuration](configs/cost.json), [threshold grid](threshold_cost_analysis.csv), and [sensitivity summary](reports/cost_sensitivity.csv).
 
 The held-out calibration slope of 3.30 shows that a fitted sigmoid mapping alone does not guarantee reliable probabilities. The calibration-fit partition has only 27 fraud cases; larger, later-period samples are needed to validate probability interpretation.
+
+The revised development comparison demonstrates why predictive ranking and business ranking differ. Under doubled fraud-loss cost, the weighted engineered forest has selection AP **0.1992** versus **0.2891** for the selected logistic baseline, yet optimized development cost is **16.83** versus **21.01** units per transaction. These are exploratory, optimized development costs with a common sigmoid calibration method, not independent test savings. The frozen final model remains the AP-selected logistic baseline. See [measured answers to the business questions](reports/assessment_answers.md), [all model costs](reports/model_cost_comparison.csv), and [recall versus review workload](reports/recall_review_workload.csv).
 
 ![Precision-recall curve on the held-out test partition](reports/figure_13.png)
 
@@ -98,6 +100,8 @@ flowchart LR
 
 The splits are **stratified, not chronological**. The policy-selection partition is used for both calibration-method comparison and threshold optimization, so its development cost estimate may be optimistic. The final-test labels were not used for those choices.
 
+The same test partition had already been inspected before this revision. Its repeated results are regression evidence, not a fresh untouched holdout. Candidate CV variability is measured across three training folds; tuned-candidate summaries reuse training-selected hyperparameters and are not nested-CV estimates.
+
 ### Cost Accounting
 
 The operational simulation assigns one cost per transaction to avoid double counting:
@@ -123,6 +127,8 @@ The implementation and configuration are in [core.py](src/fraud_pipeline/core.py
    pip install -r requirements.txt
    ```
 
+   The measured run used Python 3.11.9. For the tested direct dependency versions, install `requirements-lock.txt` instead. [environment.json](reports/environment.json) records package versions, seeds, and the raw-data SHA-256; [split_manifest.csv](reports/split_manifest.csv) records partition membership.
+
    If your prompt already begins with `(.venv)`, the environment is active: skip `python -m venv .venv` and activation, then run `python -m pip install -r requirements.txt`. Recreating an active environment can fail because `.venv\Scripts\python.exe` is in use. On macOS/Linux, activate with `source .venv/bin/activate`.
 
    If pip reports `No matching distribution found` with `from versions: none` for pandas, retry with a longer index timeout:
@@ -142,7 +148,7 @@ The implementation and configuration are in [core.py](src/fraud_pipeline/core.py
    # or: python scripts/run_analysis.py --data "path\to\transaction_fraud_risk_advanced_dataset.csv"
    ```
 
-4. Open `fraud_risk_analysis.ipynb` in Jupyter or an IDE if you want to inspect or rerun its cells. `run_analysis.py` saves it **with executed outputs**. For interactive Jupyter execution, install `jupyterlab ipykernel` separately. The notebook expects the CSV at the default `data/raw/` path and can rebuild missing analysis outputs.
+4. Open `fraud_risk_analysis.ipynb` in Jupyter or an IDE. `run_analysis.py` saves it **with executed outputs**. Running its cells rebuilds analysis outputs from source rather than reusing stale reports. For interactive Jupyter execution, install `jupyterlab ipykernel` separately. The generated notebook records the source CSV path; update its `source` variable if you move the dataset.
 
 5. Score a new batch and run the tests:
 
@@ -152,6 +158,18 @@ The implementation and configuration are in [core.py](src/fraud_pipeline/core.py
    ```
 
 The prediction input needs the source transaction fields and a transaction ID. The batch output contains a UTC scoring timestamp, calibrated probability, `APPROVE`/`REVIEW`/`BLOCK` decision, reason code, model version, missing-input warning, and estimated cost. Missing amounts cannot be automatically approved; they are routed to review unless their score calls for a block. Load joblib files only from trusted sources; do not send raw card numbers or credentials to this pipeline.
+
+Every review/block also has an `explanation`: the selected logistic model reports its intercept and largest signed contributions to base-model log odds. These are exact individual terms, but the displayed top five omit other terms and do not sum to a calibrated probability. They are associations, not causal explanations or approved customer-facing decline reasons. The tree fallback uses single-field ablation and explicitly states its nonadditive limitation.
+
+```python
+import sys, joblib
+sys.path.insert(0, "src")
+engine = joblib.load("calibrated_model.joblib")["engine"]
+probabilities = engine.predict_proba(transactions)  # raw source fields; no fraud label needed
+decisions = engine.predict(transactions)  # probability, action, explanation and accounting
+```
+
+The training-only sampler wraps the entire preprocessing/model pipeline; each CV fit samples only its own fit rows. Learned population references, imputation, encoding and scaling are all fitted within the relevant model fit. Start new experiments from the raw CSV, not the processed export, to avoid reusing precomputed reference statistics across folds.
 
 ## Repository Map
 
@@ -163,8 +181,9 @@ The prediction input needs the source transaction fields and a transaction ID. T
 | [calibrated_model.joblib](calibrated_model.joblib) | Calibrator, policy, and cost settings |
 | [threshold_cost_analysis.csv](threshold_cost_analysis.csv) | Joint threshold search and sensitivity scenarios |
 | [model_card.pdf](model_card.pdf) | One-page governance summary |
-| [business_fraud_strategy.pdf](business_fraud_strategy.pdf) | Ten-page management report |
+| [business_fraud_strategy.pdf](business_fraud_strategy.pdf) | Twelve-page management report |
 | [scripts/run_analysis.py](scripts/run_analysis.py) | Reproducible experiment and report generator |
+| [scripts/build_business_report.py](scripts/build_business_report.py) | Rebuild the standalone final report from saved evidence |
 | [scripts/predict_transactions.py](scripts/predict_transactions.py) | Batch inference entry point |
 | [src/fraud_pipeline/core.py](src/fraud_pipeline/core.py) | Reusable features, models, calibration, costs, and inference |
 | [reports/](reports/) | Audit, metrics, charts, explanations, stress checks, and predictions |
@@ -175,17 +194,23 @@ The prediction input needs the source transaction fields and a transaction ID. T
 
 ## Validation and Remaining Work
 
-All requested *artifact types* are present under descriptive filenames, but the full original specification is **not complete** because the supplied data cannot support temporal or customer-history validation. Current checks: the notebook has 20 sections and executed outputs, both saved artifacts reload, batch inference scored 3,000 rows, the business PDF has 10 pages, and **8 pytest tests passed**.
+The eight deliverables use descriptive filenames in the repository root: `fraud_risk_analysis.ipynb`, `processed_dataset.csv`, `fraud_model_pipeline.joblib`, `calibrated_model.joblib`, `threshold_cost_analysis.csv`, `model_card.pdf`, `business_fraud_strategy.pdf`, and `README.md`. No numbered copies are generated. Load the base artifact's `pipeline` entry for raw-frame prediction, or the calibrated artifact's `engine` entry for feature engineering, fitted preprocessing/model, calibration, policy and costs together. Other dictionary entries remain available for analysis compatibility.
+
+The notebook has 20 main sections plus extended evidence and executed outputs. The business PDF has 12 pages. The verification suite covers threshold boundaries, cost accounting, reference fitting, fit-only sampling, perturbed-input review routing, raw-frame artifact inference, per-flag explanations, PDF page counts and notebook outputs. Data-dependent requirements remain limited by the absence of trustworthy chronology and customer keys; no full production-readiness claim is supported.
+
+The final management report, [business_fraud_strategy.pdf](business_fraud_strategy.pdf), explains the project without requiring the code: executive assessment, data quality, validation and features, fraud patterns, model comparison, probability calibration, decision costs, business impact, five local explanations, stress tests, and a governance roadmap. Tables distinguish development comparisons from final-test results and simulated outcomes. To refresh only its writing/layout from saved evidence, run `python scripts/build_business_report.py`; the full analysis command also uses this report builder. Page previews are saved under `reports/business_report_preview/` for layout review.
+
+Validation after the revision: **14 tests passed**, and the standalone scoring command processed **3,000 transactions** using the single calibrated engine. See the [requirements checklist](docs/requirements_checklist.md) for the A–K evidence and remaining data-dependent limits.
 
 | Area | Current state | Needed for a stronger claim |
 | :--- | :--- | :--- |
 | Temporal validation | No reliable event or label timestamps | Collect timestamps, enforce label maturity, use chronological holdouts and expanding folds |
 | Historical features | Supplied velocity and chargeback fields used as provided | Obtain customer IDs and point-in-time feature lineage |
-| Model search | 14 candidates; logistic C tuned in three stratified training folds | Time-valid search and fold-level stability once chronology exists |
-| Class imbalance | Unweighted, class-weighted, and training-only random undersampling compared | More extensive resampling and calibration stability checks |
+| Model search | 16 candidates; logistic and both tree families tuned in three stratified training folds; candidate fold variability recorded | Time-valid and nested search once chronology and more labels exist |
+| Class imbalance | Unweighted, class-weighted, and fit-only random undersampling pipeline compared | More extensive resampling and calibration stability checks |
 | Calibration and policy | Disjoint fit and policy partitions; method choice and threshold search share the latter | Additional policy validation or out-of-fold estimates |
-| Explainability | Permutation importance and five base-logit explanations | SHAP/dependence analysis and reviewed, customer-facing reason codes |
-| Robustness | Amount, velocity, missingness, channel mix, extreme values, and resampled prevalence | Temporal drift, concept drift, and external data |
-| Governance and tests | Model card, monitoring plan, and eight focused tests | External labels, approved owners, operational alerts, and rollback drills |
+| Explainability | Permutation importance, fold stability, dependence/interaction analysis, five samples and per-flag local explanations | Reviewed customer-facing reasons and independent interpretation review |
+| Robustness | Amount, velocity, missingness with operational routing, channel mix, extreme values, and resampled prevalence | Temporal drift, concept drift, and external data |
+| Governance and tests | Model card, monitoring plan, focused regression tests and environment/split manifests | External labels, approved owners, operational alerts, and rollback drills |
 
 The model excludes `fraud` and `transaction_id` from training. Imputation and encoding are fitted on training rows only. Seeds **42-45** govern the splits and experiment; parallel tree fitting may vary slightly across platforms. Before live use, validate feature availability at authorization time, actual review success and financial costs, customer impact, prospective shadow performance, and an approved fallback policy. This prototype must not independently authorize or block payments.

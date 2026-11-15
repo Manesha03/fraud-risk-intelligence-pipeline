@@ -16,7 +16,7 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
+    engine = joblib.load(ROOT / "calibrated_model.joblib")["engine"]
     data = pd.read_csv(args.input)
     result = engine.predict(data)
     result.to_csv(args.output, index=False)

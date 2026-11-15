@@ -131,7 +131,7 @@ def test_sampling_fits_preprocessing_only_on_sampled_training_rows():
 
 
 def test_single_artifact_scores_raw_transactions_and_explains_every_flag():
-    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
+    engine = joblib.load(ROOT / "calibrated_model.joblib")["engine"]
     frame = pd.read_csv(ROOT / "data/raw/transaction_fraud_risk_advanced_dataset.csv").head(100)
     frame = frame.drop(columns=["fraud"])
     result = engine.predict(frame)
@@ -139,7 +139,7 @@ def test_single_artifact_scores_raw_transactions_and_explains_every_flag():
     flagged = result.decision.ne("APPROVE")
     assert flagged.any()
     assert result.loc[flagged, "explanation"].str.len().gt(30).all()
-    raw_pipeline = joblib.load(ROOT / "03_fraud_model_pipeline.joblib")
+    raw_pipeline = joblib.load(ROOT / "fraud_model_pipeline.joblib")["pipeline"]
     assert raw_pipeline.predict_proba(frame).shape == (100, 2)
 
 
@@ -162,7 +162,7 @@ def test_reported_missingness_stress_decisions_match_operational_engine():
     changed = raw.loc[ids].copy()
     selected = np.random.default_rng(42).choice(changed.index, size=len(changed)//10, replace=False)
     changed.loc[selected, "transaction_amount"] = np.nan
-    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
+    engine = joblib.load(ROOT / "calibrated_model.joblib")["engine"]
     actual = engine.predict(changed).decision.value_counts()
     reported = pd.read_csv(ROOT / "reports/robustness.csv").set_index("scenario").loc["missing_amount_10pct"]
     for decision in ("APPROVE", "REVIEW", "BLOCK"):
