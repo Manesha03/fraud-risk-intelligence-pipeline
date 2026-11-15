@@ -9,7 +9,7 @@ import nbformat
 import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from fraud_pipeline.core import Policy, calibration_diagnostics, features, operational_decisions, predict, realized_cost
+from fraud_pipeline.core import Policy, ReferenceFeatures, TrainingUnderSampler, calibration_diagnostics, features, make_model, operational_decisions, policy_stats, predict, realized_cost
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -91,3 +91,79 @@ def test_calibration_diagnostics_validate_probabilities():
     assert 0 <= summary["expected_calibration_error"] <= 1
     with pytest.raises(ValueError):
         calibration_diagnostics([0,1],[.2,np.nan])
+    assert calibration_diagnostics([0, 1], [.1, .1])["expected_calibration_error"] == pytest.approx(.4)
+
+
+def test_stress_missing_input_and_financial_exposure_are_separate():
+    cfg = {**config(), "review_capacity_fraction": .15}
+    stats = policy_stats(np.array([1, 0]), np.array([.01, .01]), np.array([np.nan, 50]),
+                         Policy(.2, .8), cfg, exposure_amount=np.array([200, 50]))
+    assert stats["review_count"] == 1
+    assert stats["approve_count"] == 1
+    assert stats["total_expected_cost"] == pytest.approx(43)
+
+
+def test_reference_features_never_learn_from_inference_rows():
+    train = pd.DataFrame({"transaction_amount": [10., 30.], "merchant_category": ["A", "A"],
+                          "channel": ["web", "web"], "distance_from_usual_location_km": [2., 6.],
+                          "amount_to_merchant_median": [np.nan]*2,
+                          "amount_merchant_deviation": [np.nan]*2,
+                          "distance_channel_deviation": [np.nan]*2})
+    reference = ReferenceFeatures().fit(train)
+    scored = train.iloc[:1].copy()
+    scored["transaction_amount"] = 1000.
+    assert reference.transform(scored).amount_to_merchant_median.iloc[0] == 50
+    scored["merchant_category"] = "never seen"
+    assert reference.transform(scored).amount_to_merchant_median.iloc[0] == 50
+    assert reference.merchant_["A"] == 20
+
+
+def test_sampling_fits_preprocessing_only_on_sampled_training_rows():
+    frame = pd.DataFrame({"value": np.arange(20, dtype=float)})
+    labels = np.array([1]*3 + [0]*17)
+    estimator = TrainingUnderSampler(make_model(frame, "logistic"), majority_ratio=2).fit(frame, labels)
+    assert len(estimator.sample_indices_) == 9
+    imputer = estimator.named_steps["prep"].named_transformers_["num"].named_steps["impute"]
+    assert imputer.statistics_[0] == np.median(frame.iloc[estimator.sample_indices_].value)
+    before = estimator.sample_indices_.copy()
+    assert estimator.predict_proba(frame).shape == (20, 2)
+    np.testing.assert_array_equal(before, estimator.sample_indices_)
+
+
+def test_single_artifact_scores_raw_transactions_and_explains_every_flag():
+    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
+    frame = pd.read_csv(ROOT / "data/raw/transaction_fraud_risk_advanced_dataset.csv").head(100)
+    frame = frame.drop(columns=["fraud"])
+    result = engine.predict(frame)
+    np.testing.assert_allclose(engine.predict_proba(frame)[:, 1], result.fraud_probability)
+    flagged = result.decision.ne("APPROVE")
+    assert flagged.any()
+    assert result.loc[flagged, "explanation"].str.len().gt(30).all()
+    raw_pipeline = joblib.load(ROOT / "03_fraud_model_pipeline.joblib")
+    assert raw_pipeline.predict_proba(frame).shape == (100, 2)
+
+
+def test_partition_manifest_is_disjoint_and_reference_fit_is_train_only():
+    manifest = pd.read_csv(ROOT / "reports/split_manifest.csv")
+    assert not manifest.transaction_id.duplicated().any()
+    assert set(manifest.partition) == {"train", "selection", "calibration_fit", "policy_selection", "test"}
+    raw = pd.read_csv(ROOT / "data/raw/transaction_fraud_risk_advanced_dataset.csv")
+    assert set(manifest.transaction_id) == set(raw.transaction_id)
+    train = raw[raw.transaction_id.isin(manifest.loc[manifest.partition.eq("train"), "transaction_id"])]
+    fitted = ReferenceFeatures().fit(features(train))
+    expected = train.groupby("merchant_category").transaction_amount.median().to_dict()
+    assert fitted.merchant_ == expected
+
+
+def test_reported_missingness_stress_decisions_match_operational_engine():
+    manifest = pd.read_csv(ROOT / "reports/split_manifest.csv")
+    ids = manifest.loc[manifest.partition.eq("test"), "transaction_id"]
+    raw = pd.read_csv(ROOT / "data/raw/transaction_fraud_risk_advanced_dataset.csv").set_index("transaction_id", drop=False)
+    changed = raw.loc[ids].copy()
+    selected = np.random.default_rng(42).choice(changed.index, size=len(changed)//10, replace=False)
+    changed.loc[selected, "transaction_amount"] = np.nan
+    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
+    actual = engine.predict(changed).decision.value_counts()
+    reported = pd.read_csv(ROOT / "reports/robustness.csv").set_index("scenario").loc["missing_amount_10pct"]
+    for decision in ("APPROVE", "REVIEW", "BLOCK"):
+        assert actual.get(decision, 0) == reported[f"{decision.lower()}_count"]
