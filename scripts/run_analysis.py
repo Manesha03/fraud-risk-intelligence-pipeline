@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import sys
+import shutil
+import textwrap
 from pathlib import Path
 
 import joblib
@@ -26,6 +28,8 @@ from sklearn.inspection import permutation_importance
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from fraud_pipeline.core import ENGINEERED, Policy, SigmoidCalibrator, calibration_diagnostics, features, make_model, metrics, operational_decisions, policy_stats, predict, read_data, search_policy
+from fraud_pipeline.core import FraudDecisionEngine, FraudModelPipeline, ReferenceFeatures, TrainingUnderSampler
+from fraud_pipeline.assessment import development_economics, extended_plots, fold_evidence, evidence_answers, environment_manifest
 
 
 def figure(title, fn):
@@ -51,6 +55,7 @@ def main():
     select, calibration = train_test_split(remainder, test_size=.5, stratify=remainder.fraud, random_state=44)
     cal_fit, policy_set = train_test_split(calibration, test_size=.5, stratify=calibration.fraud, random_state=45)
     partitions = {"train":train,"selection":select,"calibration_fit":cal_fit,"policy_selection":policy_set,"test":test}
+    environment_manifest(ROOT, partitions, Path(args.data))
     audit = {"source":str(Path(args.data).name),"shape":list(df.shape),"fraud_counts":df.fraud.value_counts().to_dict(),"missing":df.isna().sum().to_dict(),"duplicates":int(df.duplicated().sum()),"duplicate_ids":int(df.transaction_id.duplicated().sum()),"partitions":{k:{"rows":len(v),"fraud":int(v.fraud.sum())} for k,v in partitions.items()},"validation_limit":"No reliable timestamp or customer identifier; stratified random partitions are not temporal evidence.","availability_questions":["prior_chargebacks","transactions_last_1h","transactions_last_24h","merchant_risk_score","ip_risk_score","distance_from_usual_location_km"]}
     audit["dtypes"] = {column:str(dtype) for column,dtype in df.dtypes.items()}
     audit["cardinality"] = {column:int(count) for column,count in df.nunique(dropna=True).items()}
@@ -62,6 +67,12 @@ def main():
         if missing.any():
             audit["missingness_vs_fraud_train"][column] = {"missing_count":int(missing.sum()),"fraud_rate_missing":float(train.loc[missing,"fraud"].mean()),"fraud_rate_present":float(train.loc[~missing,"fraud"].mean())}
     audit["impossible_or_inconsistent"] = {"negative_amount":int(df.transaction_amount.lt(0).sum()),"negative_distance":int(df.distance_from_usual_location_km.lt(0).sum()),"invalid_hour":int((~df.hour.between(0,23)).sum()),"invalid_weekday":int((~df.day_of_week.between(0,6)).sum()),"hourly_count_exceeds_daily":int(df.transactions_last_1h.gt(df.transactions_last_24h).sum())}
+    for column in ["account_age_days", "device_age_days", "email_age_days", "transactions_last_1h", "transactions_last_24h", "failed_logins_24h", "prior_chargebacks", "login_to_transaction_minutes"]:
+        audit["impossible_or_inconsistent"][f"negative_{column}"] = int(df[column].lt(0).sum())
+    for column in ["merchant_risk_score", "ip_risk_score", "new_device", "billing_address_mismatch"]:
+        audit["impossible_or_inconsistent"][f"outside_0_1_{column}"] = int((df[column].notna() & ~df[column].between(0, 1)).sum())
+    df.select_dtypes(include="number").describe(percentiles=[.01,.05,.5,.95,.99]).to_csv(reports / "numeric_distributions.csv")
+    pd.concat([df[c].value_counts(dropna=False).rename_axis("value").reset_index(name="count").assign(feature=c) for c in df.select_dtypes(exclude="number")]).to_csv(reports / "categorical_distributions.csv", index=False)
     audit["cleaning_decisions"] = ["No rows excluded for extreme values.","Training-fold numeric medians and categorical modes impute model inputs.","Missing transaction amount routes an otherwise approved transaction to review and uses the configured hypothetical fallback loss for cost accounting."]
     audit["leakage_review"] = {"prohibited_inputs":["fraud","transaction_id"],"availability_unverified":audit["availability_questions"],"label_delay":"Unknown: no label timestamp supplied","timezone":"Unknown: hour and weekday have no timezone metadata"}
     (reports / "data_audit.json").write_text(json.dumps(audit, indent=2))
@@ -95,12 +106,18 @@ def main():
         fold_importance.extend({"fold":fold_number,"feature":feature,"ap_drop":float(value)} for feature,value in zip(base_cols,scores.importances_mean))
     pd.DataFrame(fold_importance).to_csv(reports / "feature_importance_folds.csv",index=False)
     candidates.append({"name":"logistic_tuned_base","model":search.best_estimator_,"columns":base_cols,"selection":metrics(yselect,search.predict_proba(xselect[base_cols])[:,1])})
-    fraud_rows = train[train.fraud.eq(1)]
-    legitimate_rows = train[train.fraud.eq(0)].sample(n=min(len(train)-len(fraud_rows),3*len(fraud_rows)),random_state=42)
-    undersampled = pd.concat([fraud_rows, legitimate_rows]).sample(frac=1,random_state=42)
-    undersampled_model = make_model(xtrain[base_cols],"logistic")
-    undersampled_model.fit(features(undersampled)[base_cols],undersampled.fraud.to_numpy())
+    undersampled_model = TrainingUnderSampler(make_model(xtrain[base_cols],"logistic"))
+    undersampled_model.fit(xtrain[base_cols], ytrain)
     candidates.append({"name":"logistic_undersampled_base","model":undersampled_model,"columns":base_cols,"selection":metrics(yselect,undersampled_model.predict_proba(xselect[base_cols])[:,1])})
+    for kind in ("forest", "extra_trees"):
+        nonlinear_search = RandomizedSearchCV(make_model(xtrain, kind),
+            {"model__min_samples_leaf": [3, 8, 15], "model__max_features": ["sqrt", .7]},
+            n_iter=3, scoring="average_precision", cv=folds, random_state=42, n_jobs=1)
+        nonlinear_search.fit(xtrain, ytrain)
+        pd.DataFrame(nonlinear_search.cv_results_).to_csv(reports / f"{kind}_tuning.csv", index=False)
+        candidates.append({"name": f"{kind}_tuned_engineered", "model": nonlinear_search.best_estimator_,
+                           "columns": list(xtrain), "selection": metrics(yselect, nonlinear_search.predict_proba(xselect)[:,1])})
+    fold_evidence(candidates, xtrain, ytrain, folds, reports)
     table = pd.DataFrame([{"name":c["name"],**c["selection"]} for c in candidates]).sort_values("average_precision", ascending=False)
     table.to_csv(reports / "model_comparison.csv", index=False)
     table[table.name.isin(["logistic_plain_base","logistic_weighted_base","logistic_undersampled_base"])].to_csv(reports / "imbalance_comparison.csv",index=False)
@@ -111,6 +128,8 @@ def main():
     calibrators = {"sigmoid":SigmoidCalibrator().fit(raw_cal,ycal),"isotonic":IsotonicRegression(out_of_bounds="clip").fit(raw_cal,ycal)}
     raw_policy = model.predict_proba(xpolicy[cols])[:,1]
     cal_scores = pd.DataFrame([{"method":name,**metrics(ypolicy,cal.predict(raw_policy)),**calibration_diagnostics(ypolicy,cal.predict(raw_policy))} for name,cal in calibrators.items()]).sort_values("brier")
+    raw_diagnostics = {"method": "uncalibrated", **metrics(ypolicy, raw_policy), **calibration_diagnostics(ypolicy, raw_policy)}
+    pd.concat([pd.DataFrame([raw_diagnostics]), cal_scores]).to_csv(reports / "calibration_before_after.csv", index=False)
     cal_scores.to_csv(reports / "calibration_comparison.csv", index=False)
     cal_name = cal_scores.iloc[0]["method"]
     calibrator = calibrators[cal_name]
@@ -120,6 +139,12 @@ def main():
     calibration_bands.groupby("risk_band",observed=True).agg(count=("observed","size"),fraud_rate=("observed","mean"),mean_probability=("probability","mean")).to_csv(reports / "calibration_risk_bands.csv")
     amount_cal = policy_set.transaction_amount.to_numpy(dtype=float)
     scenarios = {"base":cfg,"higher_fraud_loss":{**cfg,"fraud_loss_multiplier":2},"higher_block_friction":{**cfg,"legitimate_block_cost":50},"lower_review_success":{**cfg,"review_success":.6},"higher_review_cost":{**cfg,"review_cost":6}}
+    scenarios.update({"higher_review_friction": {**cfg, "legitimate_review_friction": 5},
+                      "higher_fraud_block_cost": {**cfg, "fraud_block_cost": 5},
+                      "higher_missing_loss": {**cfg, "missing_amount_fraud_loss": 250},
+                      "tighter_review_capacity": {**cfg, "review_capacity_fraction": .10}})
+    (reports / "cost_assumptions.json").write_text(json.dumps(scenarios, indent=2))
+    economics = development_economics(candidates, xcal, ycal, xpolicy, ypolicy, amount_cal, scenarios, reports)
     grids = []
     for name,setting in scenarios.items():
         grid = search_policy(ypolicy,pcal,amount_cal,setting)
@@ -135,7 +160,10 @@ def main():
     chosen = valid.iloc[0]
     policy = Policy(float(chosen.review_threshold),float(chosen.block_threshold))
     joblib.dump({"model":model,"columns":cols,"version":"1.0","selection_metrics":best["selection"]}, ROOT / "fraud_model_pipeline.joblib")
-    joblib.dump({"calibrator":calibrator,"method":cal_name,"policy":policy,"cost":cfg},ROOT / "calibrated_model.joblib")
+    joblib.dump(FraudModelPipeline(model), ROOT / "03_fraud_model_pipeline.joblib")
+    engine = FraudDecisionEngine(model, calibrator, policy, cfg)
+    joblib.dump({"calibrator":calibrator,"method":cal_name,"policy":policy,"cost":cfg,"engine":engine},ROOT / "calibrated_model.joblib")
+    joblib.dump(engine, ROOT / "04_calibrated_model.joblib")
     ptest = calibrator.predict(model.predict_proba(xtest[cols])[:,1])
     test_metrics = metrics(ytest,ptest)
     test_metrics.update(calibration_diagnostics(ytest,ptest))
@@ -147,14 +175,15 @@ def main():
     review_only = policy_stats(ytest,ptest,test.transaction_amount.to_numpy(dtype=float),Policy(policy.review,1),cfg)
     summary = {"selected_model":best_name,"calibration":cal_name,"policy":{"review":policy.review,"block":policy.block},"selection_metrics":best["selection"],"calibration_metrics":cal_scores.iloc[0].to_dict(),"stratified_cv_best_C":float(search.best_params_["model__C"]),"stratified_cv_ap_mean":float(search.best_score_),"test_metrics":test_metrics,"test_policy":test_stats,"approve_all":baseline,"binary_050":binary,"review_only":review_only,"limitations":audit["validation_limit"]}
     (reports / "results.json").write_text(json.dumps(summary,indent=2))
-    processed = df.drop(columns=["fraud"]).join(features(df)[ENGINEERED]).assign(fraud=df.fraud)
+    processed_features = ReferenceFeatures().fit(xtrain).transform(features(df))
+    processed = df.drop(columns=["fraud"]).join(processed_features[ENGINEERED]).assign(fraud=df.fraud)
     processed.to_csv(ROOT / "processed_dataset.csv",index=False)
     prediction = predict(test,model,calibrator,policy,cfg)
     prediction.to_csv(reports / "test_predictions.csv",index=False)
     if hasattr(model.named_steps["model"], "coef_"):
         flagged=np.flatnonzero(prediction.decision.to_numpy()!="APPROVE")[:5]
         names=model.named_steps["prep"].get_feature_names_out()
-        transformed=model.named_steps["prep"].transform(xtest.iloc[flagged][cols])
+        transformed=model.named_steps["prep"].transform(model.named_steps["reference"].transform(xtest.iloc[flagged][cols]))
         if hasattr(transformed,"toarray"):
             transformed=transformed.toarray()
         contributions=np.asarray(transformed) * model.named_steps["model"].coef_[0]
@@ -163,9 +192,12 @@ def main():
             ranked=np.argsort(-contributions[pos])[:5]
             local.append({"transaction_id":str(test.iloc[row].transaction_id),"calibrated_probability":float(ptest[row]),"decision":str(test_decisions[row]),"top_positive_base_logit_contributions":"; ".join(f"{names[j]}={contributions[pos,j]:.3f}" for j in ranked if contributions[pos,j]>0),"limitation":"Base logistic log-odds contributions; sigmoid calibration changes the probability scale; associations are not causal."})
         pd.DataFrame(local).to_csv(reports/"local_explanations.csv",index=False)
+    prediction.loc[prediction.decision.ne("APPROVE"), ["transaction_id", "fraud_probability", "decision", "explanation"]].head(5).to_csv(reports / "local_explanations.csv", index=False)
     importance = permutation_importance(model,xselect[cols],yselect,n_repeats=3,random_state=42,scoring="average_precision")
     importance_table = pd.DataFrame({"feature":cols,"ap_drop_mean":importance.importances_mean,"ap_drop_sd":importance.importances_std}).sort_values("ap_drop_mean",ascending=False)
     importance_table.to_csv(reports/"feature_importance.csv",index=False)
+    extra_paths = extended_plots(train, select, model, calibrators, xpolicy, ypolicy, raw_policy, reports)
+    winners = evidence_answers(economics, importance_table, sensitivity, grids, scenarios, ypolicy, pcal, amount_cal, reports)
     stress_rows=[]
     for name,changed in [
         ("base",test.copy()),
@@ -184,10 +216,11 @@ def main():
             changed.loc[chosen_rows,"transaction_amount"] *= 10
         try:
             score=calibrator.predict(model.predict_proba(features(changed)[cols])[:,1])
-            stat=policy_stats(ytest,score,test.transaction_amount.to_numpy(dtype=float),policy,cfg)
+            stat=policy_stats(ytest,score,changed.transaction_amount.to_numpy(dtype=float),policy,cfg,
+                              exposure_amount=test.transaction_amount.to_numpy(dtype=float))
             stress_rows.append({"scenario":name,**metrics(ytest,score),**stat,"failed":0})
-        except Exception:
-            stress_rows.append({"scenario":name,"failed":len(changed)})
+        except Exception as error:
+            stress_rows.append({"scenario":name,"failed":len(changed),"error":str(error)})
     weights = np.where(ytest == 1,2.0,1.0)
     selected_rows = np.random.default_rng(42).choice(len(test),size=len(test),replace=True,p=weights/weights.sum())
     shifted = test.iloc[selected_rows]
@@ -214,24 +247,44 @@ def main():
     figures.append(figure("Calibration cost against review threshold",lambda ax:valid.groupby("review_threshold").total_expected_cost.min().plot(ax=ax)))
     for i,fig in enumerate(figures,1):
         fig.savefig(reports/f"figure_{i:02d}.png",dpi=120)
+        plt.close(fig)
+    for number, name in enumerate(["interaction_new_device_distance_from_usual_location_km.png",
+                                   "interaction_merchant_risk_score_transaction_amount.png",
+                                   "interaction_authentication_level_channel.png"], 10):
+        shutil.copyfile(reports / name, reports / f"figure_{number:02d}.png")
     # Each page contains measured results or explicitly labeled assumptions.
     pages=[("Executive summary",[f"Supplied dataset: {len(df):,} transactions; fraud prevalence {df.fraud.mean():.1%}.",f"Selected: {best_name}; {cal_name} calibration.",f"Test AP {test_metrics['average_precision']:.3f}; ROC-AUC {test_metrics['roc_auc']:.3f}.","Costs and review outcomes below are hypothetical, not observed business outcomes."],0),
     ("Data and quality",[f"Missing authentication: {df.authentication_level.isna().sum()}; amount: {df.transaction_amount.isna().sum()}.","No event timestamp or customer key: temporal and historical evaluation unavailable.","Prior chargebacks and upstream risk scores require authorization-time verification."],1),
     ("Fraud patterns",["Charts show training-partition associations, not causal effects.","Small cells and missing categories require caution."],3),
     ("Model comparison",[table.head(6).round(3).to_string(index=False),f"Best stratified CV AP {search.best_score_:.3f}; C={search.best_params_['model__C']}.","Selection and CV are not temporal evidence."],None),
-    ("Calibration",[cal_scores.round(4).to_string(index=False),"Calibrators were fitted on a separate calibration-fit partition.","Method comparison and policy search share the policy-selection partition."],12),
-    ("Cost policy",[f"Review >= {policy.review:.4f}; block >= {policy.block:.4f}.",f"Review labor {cfg['review_cost']}; legitimate block {cfg['legitimate_block_cost']}; review success {cfg['review_success']:.0%}.",f"Missing amount: REVIEW fallback; assumed fraud loss {cfg['missing_amount_fraud_loss']}.","Sensitivity results: see reports/cost_sensitivity.csv."],13),
+    ("Calibration",[cal_scores[["method","brier","log_loss","calibration_slope"]].round(4).to_string(index=False),"Calibrators were fitted on a separate calibration-fit partition.","Method comparison and policy search share the policy-selection partition.",f"Final regression-test calibration slope: {test_metrics['calibration_slope']:.2f} (ideal 1); fitted calibration is not proof of reliability."],13),
+    ("Cost policy",[f"Review >= {policy.review:.4f}; block >= {policy.block:.4f}.",f"Review labor {cfg['review_cost']}; legitimate block {cfg['legitimate_block_cost']}; review success {cfg['review_success']:.0%}.",f"Missing amount: REVIEW fallback; assumed fraud loss {cfg['missing_amount_fraud_loss']}.","Nine cost/capacity scenarios: see reports/cost_sensitivity.csv."],14),
     ("Operational test simulation",[f"Review {test_stats['review_count']}; block {test_stats['block_count']}; legitimate blocks {test_stats['legitimate_block_count']}.",f"Policy cost {test_stats['total_expected_cost']:.2f}; approve-all {baseline['total_expected_cost']:.2f}; review-only {review_only['total_expected_cost']:.2f}.",f"Fraud capture assumption-adjusted: {test_stats['fraud_capture_rate']:.1%}.","Review capacity is a per-batch fraction, not a staffed SLA."],None),
     ("Explainability",["Permutation importance and five local base-logit explanations are saved in reports/.","Sigmoid calibration changes the probability scale; logit contributions are not calibrated-probability contributions.","Neither importance nor local contributions establish causality."],None),
     ("Robustness and monitoring",[stress_table[["scenario","average_precision","review_count","cost_per_transaction"]].round(3).to_string(index=False),"Controlled perturbations retain the original labels; they are not real-world attacks.","Monitor missingness, score drift, review capacity and mature-label performance."],None),
     ("Recommendations",["Collect event timestamp, label timestamp, customer key and feature-availability lineage.","Validate review success and customer-friction economics with operations.","Run prospective shadow evaluation and governance approval before integration."],None)]
+    pages.extend([
+        ("Model economics and tradeoffs", ["Development comparisons; all candidates use sigmoid calibration for comparability.",
+          *[f"{row.cost_scenario}: {row.model}; cost/transaction {row.cost_per_transaction:.2f}" for row in winners.itertuples()],
+          "See assessment_answers.md for measured AP/cost reversals. These optimized development costs are exploratory."], None),
+        ("Predictors, interactions and uncertainty", [
+          "Leading selection permutation importances:", importance_table.head(5).round(4).to_string(index=False),
+          "Fold stability: candidate_cv_summary.csv and selected_baseline_importance_folds.csv.",
+          "Observed interaction contrasts (cells with at least 30 rows):",
+          pd.read_csv(reports / "interaction_effects.csv").round(3).to_string(index=False),
+          "Dependence plots show model associations; interventions may create uncommon combinations.",
+          "This test partition was inspected before this revision; a fresh external holdout is still required."], None)
+    ])
     with PdfPages(ROOT/"business_fraud_strategy.pdf") as pdf:
-        for title,lines,chart in pages:
+        for page_number,(title,lines,chart) in enumerate(pages, 1):
             fig=plt.figure(figsize=(8.27,11.69));fig.text(.08,.94,title,fontsize=20,weight="bold")
-            fig.text(.08,.85,"\n\n".join(lines),fontsize=10,va="top",family="monospace",wrap=True)
+            wrapped = "\n\n".join("\n".join(textwrap.fill(line, 94) for line in paragraph.splitlines()) for paragraph in lines)
+            fig.text(.06,.87,wrapped,fontsize=8.3,va="top",family="monospace")
             if chart is not None:
                 from matplotlib.image import imread
                 ax=fig.add_axes([.1,.1,.8,.38]);ax.imshow(imread(reports/f"figure_{chart+1:02d}.png"));ax.axis("off")
+            if page_number in (5, 9, 11, 12):
+                fig.savefig(reports / f"strategy_page_{page_number:02d}_preview.png", dpi=100)
             pdf.savefig(fig);plt.close(fig)
     with PdfPages(ROOT/"model_card.pdf") as pdf:
         fig=plt.figure(figsize=(8.27,11.69));fig.text(.08,.94,"Fraud model card | version 1.0",fontsize=18,weight="bold")
@@ -247,11 +300,11 @@ def main():
         cells.append(nbformat.v4.new_markdown_cell("# Fraud risk analysis\nOffline assessment on supplied data. Costs and review outcomes are assumptions, not observed business results."))
         section("1. Objective and assumptions", "Score fraud probability, simulate three decisions, and minimize hypothetical cost subject to review capacity. No event timestamps or customer keys are available.")
         section("2. Environment and reproducibility", "Seeds 42-45 control splitting and models. Execute from the repository root; raw CSV belongs in `data/raw/`.", "from pathlib import Path\nimport json, pandas as pd, subprocess, sys\nprint('Python:', sys.version.split()[0])")
-        section("3. Dataset loading", "If analysis outputs are absent, this cell runs the pipeline without regenerating the open notebook.", "if not Path('reports/results.json').exists():\n    subprocess.run([sys.executable, 'scripts/run_analysis.py', '--skip-notebook'], check=True)\ndata = pd.read_csv('data/raw/transaction_fraud_risk_advanced_dataset.csv')\nprint('Shape:', data.shape, 'Fraud:', int(data.fraud.sum()))")
+        section("3. Dataset loading", "Running this notebook rebuilds analysis outputs from source, without regenerating the open notebook. Existing outputs are not silently reused.", "source = " + repr(str(Path(args.data).resolve())) + "\nif not globals().get('_pipeline_build_complete', False):\n    subprocess.run([sys.executable, 'scripts/run_analysis.py', '--skip-notebook', '--data', source], check=True)\ndata = pd.read_csv(source)\nprint('Shape:', data.shape, 'Fraud:', int(data.fraud.sum()))")
         section("4. Data audit", "Schema, missingness, duplicate identifiers, and partition counts are machine-readable in `reports/data_audit.json`.", "audit = json.loads(Path('reports/data_audit.json').read_text())\nprint(pd.Series(audit['missing']).sort_values(ascending=False).head(12).to_string())\nprint(audit['partitions'])")
         section("5. Leakage assessment", "`fraud` and transaction IDs are excluded. Chargebacks, velocity, distance, and upstream scores require point-in-time lineage proof before deployment.")
         section("6. Exploratory analysis", "Charts use training rows for fraud patterns. Full-data quality charts are descriptive. Interaction cells may have small sample sizes.\n\n![Class distribution](reports/figure_01.png)\n\n![Missingness](reports/figure_02.png)\n\n![Channel fraud rates](reports/figure_04.png)\n\n![Device-distance interaction](reports/figure_10.png)\n\n![Merchant amount interaction](reports/figure_11.png)")
-        section("7. Feature engineering", "Thirteen row-local features are defined in `fraud_pipeline.core.features`; no customer-history statistic is inferred from future records.", "print(pd.read_csv('processed_dataset.csv', nrows=1).columns.tolist())")
+        section("7. Feature engineering", "Eighteen derived features include training-fold merchant amount normalization and channel distance deviation. Population references are fitted inside each training pipeline; they are not personal customer histories.", "print(pd.read_csv('processed_dataset.csv', nrows=1).columns.tolist())")
         section("8. Validation", "Stratified train, model-selection, calibrator-fit, policy-selection, and final-test partitions are disjoint. They are not temporal validation.", "print(pd.DataFrame(audit['partitions']).T.to_string())")
         section("9. Baseline modeling", "Unweighted logistic regression with imputation, scaling, and one-hot encoding is the reference model.", "comparison = pd.read_csv('reports/model_comparison.csv')\nprint(comparison[comparison.name.eq('logistic_plain_base')].to_string(index=False))")
         section("10. Nonlinear models", "Random forest and extra trees are compared under the same partition design.", "print(comparison[comparison.name.str.startswith(('forest','extra_trees'))].head(6).to_string(index=False))")
@@ -265,8 +318,10 @@ def main():
         section("18. Final test", "The final partition was evaluated after model, calibration, and policy selection.\n\n![Precision-recall curve](reports/figure_13.png)", "print(json.dumps(results['test_metrics'], indent=2))\nprint(json.dumps(results['test_policy'], indent=2))")
         section("19. Monitoring and governance", "Monitor missingness, unseen categories, score and decision rates, review capacity, mature-label precision, calibration, and realized loss. Human approval and rollback procedures are required before live use.")
         section("20. Conclusions and limits", "The dataset lacks event and label timestamps, customer keys, feature lineage, actual review outcomes, verified costs, and a fairness audit. No future-period or production-performance claim is supported.")
+        cells.append(nbformat.v4.new_markdown_cell("### Added evidence and required business questions\n" + (reports / "assessment_answers.md").read_text(encoding="utf-8") + "\n\n" + "\n\n".join(f"![{path}](reports/{path})" for path in extra_paths)))
+        cells.append(nbformat.v4.new_code_cell("print(pd.read_csv('reports/calibration_before_after.csv').to_string(index=False))\nprint(pd.read_csv('reports/candidate_cv_summary.csv').to_string(index=False))"))
         notebook = nbformat.v4.new_notebook(cells=cells,metadata={"kernelspec":{"display_name":"Python 3","language":"python","name":"python3"}})
-        scope = {}
+        scope = {"_pipeline_build_complete": True}
         execution_count = 0
         for cell in notebook.cells:
             if cell.cell_type != "code":
@@ -279,6 +334,15 @@ def main():
             cell.outputs = [nbformat.v4.new_output("stream",name="stdout",text=output.getvalue())]
         nbformat.validate(notebook)
         nbformat.write(notebook,ROOT/"fraud_risk_analysis.ipynb")
+    # Exact requested submission names, alongside existing compatibility filenames.
+    for source, target in {"fraud_risk_analysis.ipynb": "01_fraud_risk_analysis.ipynb",
+                           "processed_dataset.csv": "02_processed_dataset.csv",
+                           "threshold_cost_analysis.csv": "05_threshold_cost_analysis.csv",
+                           "model_card.pdf": "06_model_card.pdf",
+                           "business_fraud_strategy.pdf": "07_business_fraud_strategy.pdf",
+                           "README.md": "08_README.md"}.items():
+        if (ROOT / source).exists():
+            shutil.copyfile(ROOT / source, ROOT / target)
     print(json.dumps(summary,indent=2))
 
 

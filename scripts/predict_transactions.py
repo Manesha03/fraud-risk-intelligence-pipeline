@@ -16,10 +16,9 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    base = joblib.load(ROOT / "fraud_model_pipeline.joblib")
-    calibrated = joblib.load(ROOT / "calibrated_model.joblib")
+    engine = joblib.load(ROOT / "04_calibrated_model.joblib")
     data = pd.read_csv(args.input)
-    result = predict(data, base["model"], calibrated["calibrator"], calibrated["policy"], calibrated["cost"], base["version"])
+    result = engine.predict(data)
     result.to_csv(args.output, index=False)
     print(f"Scored {len(result)} transactions to {args.output}")
 
