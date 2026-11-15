@@ -29,6 +29,8 @@ This is a proposed plan, not a deployed monitoring service. All thresholds below
 
 PSI thresholds are screening signals, not proof of model degradation. Investigate schema changes, upstream outages, mix shifts, and delayed labels before retraining. Keep a separate reference period and a recent comparison window; do not calculate drift from the same batch being scored.
 
+The measured selection importance prioritizes `prior_chargebacks`, `new_device`, `merchant_category`, `transactions_last_1h`, and `channel`. Monitor these alongside amount, authentication missingness, upstream merchant/IP scores, and the calibrated probability distribution. The measured rankings and their three-fold variability are in `reports/feature_stability_summary.csv`; they do not establish temporal stability. Preserve the fitted merchant/channel reference values with the model rather than updating them from live scoring batches.
+
 ## Response and governance
 
 - Warning: inspect source feeds, score distributions, case mix, and mature labels; document an owner and resolution date.

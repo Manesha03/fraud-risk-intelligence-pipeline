@@ -2,6 +2,8 @@
 
 All scenarios reuse the frozen model, calibration mapping, and thresholds. Except for the prevalence scenario, they retain the same 600 final-test labels and transaction count; changes to input fields are controlled stress probes, not observations of real fraud adaptation. Reported cost uses original transaction amounts as the financial exposure while scoring uses the perturbed fields.
 
+Operational decisions also use the perturbed input amount: newly missing amounts must trigger the same review fallback as batch inference. `policy_stats(..., exposure_amount=original_amount)` separates this decision input from the original financial exposure. Amount inflation is therefore an input-corruption probe with fixed exposure, not a forecast of increased monetary losses. Missingness can push review workload over capacity; the simulation reports that breach rather than silently approving overflow.
+
 | Scenario | Exact perturbation |
 | --- | --- |
 | `base` | Unchanged final-test rows. |
