@@ -1,0 +1,4 @@
+interaction,eligible_cells,max_minus_min_rate
+new_device x distance_from_usual_location_km,6,0.1612865903042925
+merchant_risk_score x transaction_amount,9,0.10218187874750168
+authentication_level x channel,11,0.19206784734347715

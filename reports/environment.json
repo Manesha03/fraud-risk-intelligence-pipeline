@@ -1,0 +1,21 @@
+{
+  "python": "3.11.9",
+  "packages": {
+    "numpy": "2.4.6",
+    "pandas": "3.1.0",
+    "scikit-learn": "1.9.1",
+    "scipy": "1.17.1",
+    "matplotlib": "3.11.2",
+    "joblib": "1.6.0",
+    "nbformat": "5.11.1",
+    "pytest": "9.1.1"
+  },
+  "seeds": [
+    42,
+    43,
+    44,
+    45
+  ],
+  "dataset_sha256": "0138227fc85e053102d34c16fbbffe7a7fc109d8fe1785b11d00aa6247a71644",
+  "validation": "Previously inspected stratified holdout; no fresh or temporal test available"
+}

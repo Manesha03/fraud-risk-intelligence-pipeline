@@ -1,0 +1,92 @@
+{
+  "base": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_fraud_loss": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 2,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_block_friction": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 50,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "lower_review_success": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.6,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_review_cost": {
+    "review_cost": 6,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_review_friction": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 5,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_fraud_block_cost": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 5,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 100.0
+  },
+  "higher_missing_loss": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.15,
+    "missing_amount_fraud_loss": 250
+  },
+  "tighter_review_capacity": {
+    "review_cost": 3.0,
+    "legitimate_review_friction": 2.0,
+    "legitimate_block_cost": 25.0,
+    "fraud_block_cost": 1.0,
+    "review_success": 0.8,
+    "fraud_loss_multiplier": 1.0,
+    "review_capacity_fraction": 0.1,
+    "missing_amount_fraud_loss": 100.0
+  }
+}

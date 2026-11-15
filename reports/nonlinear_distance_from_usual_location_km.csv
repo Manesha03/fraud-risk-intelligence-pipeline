@@ -1,0 +1,9 @@
+bin,count,rate,midpoint,feature
+"(1.0690000000000002, 10.56]",184,0.11413043478260869,7.21,distance_from_usual_location_km
+"(10.56, 17.53]",183,0.09289617486338798,14.24,distance_from_usual_location_km
+"(17.53, 24.17]",183,0.14754098360655737,20.64,distance_from_usual_location_km
+"(24.17, 30.95]",183,0.14207650273224043,27.34,distance_from_usual_location_km
+"(30.95, 39.48]",183,0.11475409836065574,34.62,distance_from_usual_location_km
+"(39.48, 49.91]",183,0.12021857923497267,44.41,distance_from_usual_location_km
+"(49.91, 65.71]",183,0.10382513661202186,56.95,distance_from_usual_location_km
+"(65.71, 1173.269]",183,0.14754098360655737,81.3,distance_from_usual_location_km

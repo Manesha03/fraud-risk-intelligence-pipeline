@@ -252,7 +252,19 @@
     "negative_distance": 0,
     "invalid_hour": 0,
     "invalid_weekday": 0,
-    "hourly_count_exceeds_daily": 0
+    "hourly_count_exceeds_daily": 0,
+    "negative_account_age_days": 0,
+    "negative_device_age_days": 0,
+    "negative_email_age_days": 0,
+    "negative_transactions_last_1h": 0,
+    "negative_transactions_last_24h": 0,
+    "negative_failed_logins_24h": 0,
+    "negative_prior_chargebacks": 0,
+    "negative_login_to_transaction_minutes": 0,
+    "outside_0_1_merchant_risk_score": 0,
+    "outside_0_1_ip_risk_score": 0,
+    "outside_0_1_new_device": 0,
+    "outside_0_1_billing_address_mismatch": 0
   },
   "cleaning_decisions": [
     "No rows excluded for extreme values.",
